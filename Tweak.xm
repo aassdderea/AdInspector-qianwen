@@ -2,40 +2,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 
-// ========== 配置管理 ==========
-static NSString *const kConfigPath = @"/var/mobile/AdInspector_SkipConfig.json";
-
-static NSDictionary* loadSkipConfig() {
-    NSData *data = [NSData dataWithContentsOfFile:kConfigPath];
-    if (!data) return nil;
-    return [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-}
-
-static void saveSkipConfig(NSString *targetClass, NSString *selectorName) {
-    NSDictionary *config = @{
-        @"targetClass": targetClass ?: @"",
-        @"selectorName": selectorName ?: @"",
-        @"learnedAt": @([[NSDate date] timeIntervalSince1970])
-    };
-    NSData *data = [NSJSONSerialization dataWithJSONObject:config options:NSJSONWritingPrettyPrinted error:nil];
-    BOOL ok = [data writeToFile:kConfigPath atomically:YES];
-    // ✅ 保存后立即验证文件是否真正写入
-    BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:kConfigPath];
-    showTopLevelToast([NSString stringWithFormat:@"%@\n路径: %@\n文件存在: %@", 
-        ok && exists ? @"✅ 配置已保存!" : @"❌ 保存失败!", 
-        kConfigPath, exists ? @"YES" : @"NO"]);
-}
-
-static BOOL clearSkipConfig() {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if ([fm fileExistsAtPath:kConfigPath]) {
-        NSError *error = nil;
-        return [fm removeItemAtPath:kConfigPath error:&error];
-    }
-    return NO;
-}
-
-// ========== ✅ 绝对安全的顶层 Toast ==========
+// ========== ✅ 绝对安全的顶层 Toast（必须放在最前面）==========
 static UIWindow *g_toastWindow = nil;
 static UILabel *g_toastLabel = nil;
 static dispatch_block_t g_hideBlock = nil;
@@ -80,6 +47,38 @@ static void showTopLevelToast(NSString *message) {
             NSLog(@"[AdInspector] Toast异常: %@", e);
         }
     });
+}
+
+// ========== 配置管理 ==========
+static NSString *const kConfigPath = @"/var/mobile/AdInspector_SkipConfig.json";
+
+static NSDictionary* loadSkipConfig() {
+    NSData *data = [NSData dataWithContentsOfFile:kConfigPath];
+    if (!data) return nil;
+    return [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+}
+
+static void saveSkipConfig(NSString *targetClass, NSString *selectorName) {
+    NSDictionary *config = @{
+        @"targetClass": targetClass ?: @"",
+        @"selectorName": selectorName ?: @"",
+        @"learnedAt": @([[NSDate date] timeIntervalSince1970])
+    };
+    NSData *data = [NSJSONSerialization dataWithJSONObject:config options:NSJSONWritingPrettyPrinted error:nil];
+    BOOL ok = [data writeToFile:kConfigPath atomically:YES];
+    BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:kConfigPath];
+    showTopLevelToast([NSString stringWithFormat:@"%@\n路径: %@\n文件存在: %@", 
+        ok && exists ? @"✅ 配置已保存!" : @"❌ 保存失败!", 
+        kConfigPath, exists ? @"YES" : @"NO"]);
+}
+
+static BOOL clearSkipConfig() {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if ([fm fileExistsAtPath:kConfigPath]) {
+        NSError *error = nil;
+        return [fm removeItemAtPath:kConfigPath error:&error];
+    }
+    return NO;
 }
 
 // ========== 手势解析 & 视图诊断 ==========
@@ -161,7 +160,6 @@ static BOOL g_isThreeFingerHolding = NO;
 static CGPoint g_trackedPoint = CGPointZero;
 static dispatch_block_t g_inspectBlock = nil;
 
-// ✅ 判断是否为跳过相关文本
 static BOOL isSkipRelatedText(NSString *text) {
     if (!text || text.length == 0) return NO;
     NSString *lower = [text lowercaseString];
@@ -172,7 +170,6 @@ static BOOL isSkipRelatedText(NSString *text) {
            [lower containsString:@"dismiss"];
 }
 
-// ✅ 从 UIView 提取所有可见文本
 static NSString* extractAllTextFromView(UIView *view) {
     NSMutableString *allText = [NSMutableString string];
     if ([view isKindOfClass:[UIButton class]]) {
@@ -256,21 +253,18 @@ static void performAutoSkip() {
     }
 }
 
-// ========== ✅ 学习捕获核心：尝试从 sender 及其子视图中匹配跳过文本 ==========
 static BOOL tryLearnFromSender(id sender, id target, SEL action) {
     if (g_currentMode != AI_Mode_LearnArmed) return NO;
     
     BOOL matched = NO;
     NSString *matchedText = nil;
     
-    // 1. 检查 sender 本身
     if ([sender isKindOfClass:[UIView class]]) {
         NSString *text = extractAllTextFromView((UIView *)sender);
         if (isSkipRelatedText(text)) {
             matched = YES;
             matchedText = text;
         }
-        // 2. 递归检查 sender 的所有子视图
         if (!matched) {
             UIView *senderView = (UIView *)sender;
             for (UIView *sub in senderView.subviews) {
@@ -284,7 +278,6 @@ static BOOL tryLearnFromSender(id sender, id target, SEL action) {
         }
     }
     
-    // 3. 如果 sender 没匹配到，检查 target 是否是 VC，遍历其 view
     if (!matched && [target isKindOfClass:[UIViewController class]]) {
         UIViewController *vc = (UIViewController *)target;
         for (UIView *sub in vc.view.subviews) {
@@ -305,12 +298,10 @@ static BOOL tryLearnFromSender(id sender, id target, SEL action) {
         
         UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
         [fb impactOccurred];
-        // ✅ saveSkipConfig 内部已经会弹 Toast 确认保存结果
         NSLog(@"[AdInspector] ✅ Learned: %@.%@ (matched text: %@)", tc, sn, matchedText);
         return YES;
     }
     
-    // ✅ 学习模式下点了按钮但没匹配到，给出提示帮助调试
     NSString *senderClass = NSStringFromClass([sender class]);
     NSString *targetClass = NSStringFromClass([target class]);
     NSString *selName = NSStringFromSelector(action);
@@ -330,7 +321,6 @@ static BOOL tryLearnFromSender(id sender, id target, SEL action) {
     UITouch *anyTouch = touches.anyObject;
     if (!anyTouch) return;
     
-    // 【独立】双指长按 0.8s 激活学习
     if (count == 2) {
         if (anyTouch.phase == UITouchPhaseBegan && !g_isTwoFingerHolding) {
             g_isTwoFingerHolding = YES;
@@ -353,7 +343,6 @@ static BOOL tryLearnFromSender(id sender, id target, SEL action) {
         }
     }
     
-    // 【独立】三指长按 0.8s 诊断
     if (count == 3) {
         CGPoint centerPoint = CGPointZero;
         NSInteger validCount = 0;
@@ -387,7 +376,6 @@ static BOOL tryLearnFromSender(id sender, id target, SEL action) {
         }
     }
     
-    // 【独立】三指双击清除配置
     if (count == 3 && anyTouch.phase == UITouchPhaseEnded && anyTouch.tapCount >= 2) {
         if (g_learnArmBlock) { dispatch_block_cancel(g_learnArmBlock); g_learnArmBlock = nil; g_isTwoFingerHolding = NO; }
         if (g_inspectBlock) { dispatch_block_cancel(g_inspectBlock); g_inspectBlock = nil; g_isThreeFingerHolding = NO; }
@@ -399,10 +387,8 @@ static BOOL tryLearnFromSender(id sender, id target, SEL action) {
     }
 }
 
-// ✅ 拦截 Target-Action
 - (BOOL)sendAction:(SEL)action to:(id)target from:(id)sender forEvent:(UIEvent *)event {
     BOOL result = %orig;
-    // ✅ 不再限制 sender 必须是 UIButton，任何 UIControl 都尝试匹配
     if ([sender isKindOfClass:[UIControl class]]) {
         tryLearnFromSender(sender, target, action);
     }
@@ -410,29 +396,24 @@ static BOOL tryLearnFromSender(id sender, id target, SEL action) {
 }
 %end
 
-// ✅ 额外 Hook：捕获手势触发的跳过（针对不走 sendAction 的广告 SDK）
 %hook UIGestureRecognizer
 - (void)setState:(UIGestureRecognizerState)state {
     %orig;
     if (state == UIGestureRecognizerStateRecognized && g_currentMode == AI_Mode_LearnArmed) {
         NSArray<NSString *> *gestureActions = extractGestureActions(self);
         for (NSString *info in gestureActions) {
-            // 从手势信息中提取 target 和 selector
             NSRange arrowRange = [info rangeOfString:@" -> "];
             if (arrowRange.location != NSNotFound) {
                 NSString *selPart = [info substringFromIndex:arrowRange.location + 4];
-                // 尝试通过 _targets 获取真实 target
                 @try {
                     NSArray *targets = [self valueForKey:@"_targets"];
                     for (id targetInfo in targets) {
                         id target = [targetInfo valueForKey:@"_target"];
                         SEL sel = NSSelectorFromString(selPart);
                         if (target && [target respondsToSelector:sel]) {
-                            // 检查手势所在的 view 是否包含跳过文本
                             UIView *grView = self.view;
                             NSString *viewText = extractAllTextFromView(grView);
                             BOOL matched = isSkipRelatedText(viewText);
-                            // 也检查父视图
                             if (!matched && grView.superview) {
                                 viewText = extractAllTextFromView(grView.superview);
                                 matched = isSkipRelatedText(viewText);
@@ -463,13 +444,13 @@ static BOOL tryLearnFromSender(id sender, id target, SEL action) {
         g_currentMode = AI_Mode_AutoSkip;
         NSString *tc = config[@"targetClass"];
         NSString *sn = config[@"selectorName"];
-        showTopLevelToast([NSString stringWithFormat:@"🚀 AdInspector v7.2\n【自动模式】\n%@.%@\n\n双指长按=学习\n三指长按=诊断\n三指双击=清除", tc, sn]);
+        showTopLevelToast([NSString stringWithFormat:@"🚀 AdInspector v7.3\n【自动模式】\n%@.%@\n\n双指长按=学习\n三指长按=诊断\n三指双击=清除", tc, sn]);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             performAutoSkip();
         });
     } else {
         g_currentMode = AI_Mode_Observe;
-        showTopLevelToast(@"👁️ AdInspector v7.2\n【观察模式】不干预任何操作\n\n双指长按0.8s=激活学习\n三指长按0.8s=诊断视图\n三指双击=清除配置");
+        showTopLevelToast(@"👁️ AdInspector v7.3\n【观察模式】不干预任何操作\n\n双指长按0.8s=激活学习\n三指长按0.8s=诊断视图\n三指双击=清除配置");
     }
-    NSLog(@"[AdInspector] ✅ v7.2 loaded. Mode: %ld", (long)g_currentMode);
+    NSLog(@"[AdInspector] ✅ v7.3 loaded. Mode: %ld", (long)g_currentMode);
 }

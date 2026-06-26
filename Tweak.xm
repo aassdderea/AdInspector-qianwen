@@ -385,9 +385,13 @@ static BOOL tryLearnFromSender(id sender, id target, SEL action) {
 // ✅ v7.6 新增：Touch 级别自动跳过
 // 当配置中的 selectorName 为 "__adinspector_touch_skip__" 时
 // 在广告窗口中查找目标类的实例，对其中心点发送模拟触摸事件
+// ✅ v7.7 修复：Touch 模拟跳过（修正 KVC 赋值方式）
 static void performTouchAutoSkip(NSString *targetClassName) {
     Class cls = NSClassFromString(targetClassName);
-    if (!cls) { showTopLevelToast([NSString stringWithFormat:@"⚠️ 类不存在: %@", targetClassName]); return; }
+    if (!cls) {
+        showTopLevelToast([NSString stringWithFormat:@"⚠️ 类不存在: %@", targetClassName]);
+        return;
+    }
 
     __block BOOL triggered = NO;
     for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -395,33 +399,42 @@ static void performTouchAutoSkip(NSString *targetClassName) {
             if (!win.rootViewController.view) continue;
             UIView *tv = findTargetSubview(win.rootViewController.view, cls);
             if (tv) {
-                CGPoint center = [tv convertPoint:CGPointMake(tv.bounds.size.width / 2.0, tv.bounds.size.height / 2.0) toView:nil];
-                // 构造并发送模拟触摸事件
-                UITouch *touch = [[UITouch alloc] init];
-                // 通过 KVC 设置触摸位置和窗口（私有API，但这是唯一方式）
+                CGPoint center = [tv convertPoint:CGPointMake(tv.bounds.size.width / 2.0, tv.bounds.size.height / 2.0)
+                                           toView:nil];
                 @try {
+                    // 1. 创建 UITouch 并设置基本属性
+                    UITouch *touch = [[UITouch alloc] init];
                     [touch setValue:win forKey:@"_window"];
-                    [touch setValue:@(center.x) forKeyPath:@"_locationInWindow.x"];
-                    [touch setValue:@(center.y) forKeyPath:@"_locationInWindow.y"];
-                    [touch setValue:@(UITouchPhaseBegan) forKey:@"_phase"];
-                    [touch setValue:@(0) forKey:@"_tapCount"];
+                    [touch setValue:tv forKey:@"_view"];
+                    [touch setValue:@(YES) forKey:@"_isFirstTouchForView"];
+                    [touch setValue:@(1) forKey:@"_tapCount"];
                     [touch setValue:@([[NSDate date] timeIntervalSinceReferenceDate]) forKey:@"_timestamp"];
 
-                    UIEvent *event = [[UIEvent alloc] init];
-                    [event setValue:[NSSet setWithObject:touch] forKey:@"_touches"];
-                    [event setValue:@(UIEventTypeTouches) forKey:@"_type"];
+                    // ✅ 关键修复：用 NSValue 包装完整 CGPoint，而非分别赋值 x/y
+                    NSValue *locValue = [NSValue valueWithCGPoint:center];
+                    [touch setValue:locValue forKey:@"_locationInWindow"];
+                    [touch setValue:locValue forKey:@"_previousLocationInWindow"];
 
-                    [UIApplication.sharedApplication sendEvent:event];
+                    // 2. 发送 Began 事件
+                    [touch setValue:@(UITouchPhaseBegan) forKey:@"_phase"];
+                    UIEvent *beganEvent = [[UIEvent alloc] init];
+                    [beganEvent setValue:[NSSet setWithObject:touch] forKey:@"_touches"];
+                    [beganEvent setValue:@(UIEventTypeTouches) forKey:@"_type"];
+                    [[UIApplication sharedApplication] sendEvent:beganEvent];
 
-                    // 短暂延迟后发送 ended
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    // 3. 延迟 50ms 后发送 Ended 事件
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
                         @try {
                             [touch setValue:@(UITouchPhaseEnded) forKey:@"_phase"];
-                            UIEvent *endEvent = [[UIEvent alloc] init];
-                            [endEvent setValue:[NSSet setWithObject:touch] forKey:@"_touches"];
-                            [endEvent setValue:@(UIEventTypeTouches) forKey:@"_type"];
-                            [UIApplication.sharedApplication sendEvent:endEvent];
-                        } @catch (NSException *e) {}
+                            [touch setValue:@([[NSDate date] timeIntervalSinceReferenceDate]) forKey:@"_timestamp"];
+                            UIEvent *endedEvent = [[UIEvent alloc] init];
+                            [endedEvent setValue:[NSSet setWithObject:touch] forKey:@"_touches"];
+                            [endedEvent setValue:@(UIEventTypeTouches) forKey:@"_type"];
+                            [[UIApplication sharedApplication] sendEvent:endedEvent];
+                        } @catch (NSException *e) {
+                            NSLog(@"[AdInspector] Touch ended 异常: %@", e);
+                        }
                     });
 
                     triggered = YES;
@@ -434,9 +447,12 @@ static void performTouchAutoSkip(NSString *targetClassName) {
         }
         if (triggered) break;
     }
+
+    // 未找到目标视图时延迟重试一次
     if (!triggered) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            performTouchAutoSkip(targetClassName); // 重试一次
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            performTouchAutoSkip(targetClassName);
         });
     }
 }

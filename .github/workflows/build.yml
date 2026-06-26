@@ -1,0 +1,47 @@
+name: Build AdInspector Dylib
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-13
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Setup Theos
+      run: |
+        # 安装 Theos
+        export THEOS=/opt/theos
+        sudo mkdir -p $THEOS
+        sudo chown -R $USER:staff $THEOS
+        git clone --recursive https://github.com/theos/theos.git $THEOS
+        
+        # 安装依赖
+        brew install ldid xz
+        
+    - name: Build Dylib
+      run: |
+        export THEOS=/opt/theos
+        export PATH=$THEOS/bin:$PATH
+        
+        # 直接编译为 dylib（跳过 deb 打包）
+        make clean
+        make
+        
+        # 验证输出
+        ls -la .theos/obj/AdInspector.dylib
+        file .theos/obj/AdInspector.dylib
+        
+    - name: Upload Dylib
+      uses: actions/upload-artifact@v4
+      with:
+        name: AdInspector
+        path: .theos/obj/AdInspector.dylib
+        retention-days: 30

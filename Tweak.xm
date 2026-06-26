@@ -37,13 +37,10 @@ static void saveSkipConfig(NSString *targetClass, NSString *selectorName, NSInte
             NSString *targetClassName = NSStringFromClass([target class]);
             NSString *selectorName = NSStringFromSelector(action);
             
-            // 向上查找广告 Window 的 tag
-            NSInteger windowTag = 0;
-            UIWindow *win = btn.window;
-            while (win && ![win isKindOfClass:%c(BDNCSplashAdvertiseBaseWindow)]) {
-                win = win.parentWindow; // iOS 15+ 可用，低版本需遍历 superview
-            }
-            if (win) windowTag = win.tag;
+            // ✅ 修复：直接使用按钮所在 Window 的 tag
+            // 根据视图层级，跳过按钮是广告 Window 的子视图，btn.window 即为目标 Window
+            // 移除了 parentWindow 遍历，彻底解决低版本 SDK 编译报错问题
+            NSInteger windowTag = btn.window.tag;
             
             saveSkipConfig(targetClassName, selectorName, windowTag);
             
@@ -70,27 +67,31 @@ static void saveSkipConfig(NSString *targetClass, NSString *selectorName, NSInte
     
     NSLog(@"[AdInspector] 🚀 Auto-skip loaded: %@.%@ (tag:%ld)", targetClass, selectorName, (long)windowTag);
     
-    // 延迟执行，等待广告 Window 创建
+    // 延迟执行，等待广告 Window 创建完成
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         Class cls = NSClassFromString(targetClass);
         SEL sel = NSSelectorFromString(selectorName);
         
+        // 防御性校验：App 更新后类名或方法可能变更
         if (!cls || ![cls instancesRespondToSelector:sel]) {
             NSLog(@"[AdInspector] ⚠️ Learned config invalid. Delete %@ to relearn.", kConfigPath);
             return;
         }
         
-        // 通过 Window tag 精确定位广告实例
+        // 通过 Window tag 精确定位广告实例并触发跳过
         for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
             for (UIWindow *win in scene.windows) {
                 if (win.tag == windowTag) {
-                    // 递归查找目标 view 并触发
                     __block UIView *targetView = nil;
                     void (^findSubview)(UIView *) = ^(UIView *v) {
                         if ([v isKindOfClass:cls]) targetView = v;
                         for (UIView *sub in v.subviews) findSubview(sub);
                     };
-                    findSubview(win.rootViewController.view);
+                    
+                    // 兼容 rootViewController.view 为空的情况
+                    if (win.rootViewController.view) {
+                        findSubview(win.rootViewController.view);
+                    }
                     
                     if (targetView) {
                         #pragma clang diagnostic push

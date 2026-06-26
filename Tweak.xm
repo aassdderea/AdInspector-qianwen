@@ -2,7 +2,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 
-// ========== ✅ 绝对安全的顶层 Toast（必须放在最前面）==========
+// ========== ✅ 绝对安全的顶层 Toast ==========
 static UIWindow *g_toastWindow = nil;
 static UILabel *g_toastLabel = nil;
 static dispatch_block_t g_hideBlock = nil;
@@ -49,34 +49,76 @@ static void showTopLevelToast(NSString *message) {
     });
 }
 
-// ========== 配置管理 ==========
-static NSString *const kConfigPath = @"/var/mobile/AdInspector_SkipConfig.json";
+// ========== ✅ 配置管理（使用 App Documents 目录）==========
+static NSString* getConfigPath() {
+    // 优先使用 Documents 目录（App 有完整读写权限）
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docDir = paths.firstObject;
+    if (docDir) {
+        return [docDir stringByAppendingPathComponent:@"AdInspector_SkipConfig.json"];
+    }
+    // 兜底：Caches 目录
+    NSArray *cachePaths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
+    NSString *cacheDir = cachePaths.firstObject;
+    if (cacheDir) {
+        return [cacheDir stringByAppendingPathComponent:@"AdInspector_SkipConfig.json"];
+    }
+    // 最终兜底：tmp 目录（重启后可能被清理）
+    return [NSTemporaryDirectory() stringByAppendingPathComponent:@"AdInspector_SkipConfig.json"];
+}
 
 static NSDictionary* loadSkipConfig() {
-    NSData *data = [NSData dataWithContentsOfFile:kConfigPath];
+    NSString *path = getConfigPath();
+    NSData *data = [NSData dataWithContentsOfFile:path];
     if (!data) return nil;
     return [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
 }
 
 static void saveSkipConfig(NSString *targetClass, NSString *selectorName) {
+    NSString *path = getConfigPath();
+    
+    // ✅ 确保父目录存在
+    NSString *dir = [path stringByDeletingLastPathComponent];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:dir]) {
+        NSError *mkdirErr = nil;
+        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&mkdirErr];
+        if (mkdirErr) {
+            showTopLevelToast([NSString stringWithFormat:@"❌ 创建目录失败:\n%@", mkdirErr.localizedDescription]);
+            return;
+        }
+    }
+    
     NSDictionary *config = @{
         @"targetClass": targetClass ?: @"",
         @"selectorName": selectorName ?: @"",
         @"learnedAt": @([[NSDate date] timeIntervalSince1970])
     };
-    NSData *data = [NSJSONSerialization dataWithJSONObject:config options:NSJSONWritingPrettyPrinted error:nil];
-    BOOL ok = [data writeToFile:kConfigPath atomically:YES];
-    BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:kConfigPath];
-    showTopLevelToast([NSString stringWithFormat:@"%@\n路径: %@\n文件存在: %@", 
-        ok && exists ? @"✅ 配置已保存!" : @"❌ 保存失败!", 
-        kConfigPath, exists ? @"YES" : @"NO"]);
+    NSError *jsonErr = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:config options:NSJSONWritingPrettyPrinted error:&jsonErr];
+    if (!data) {
+        showTopLevelToast([NSString stringWithFormat:@"❌ JSON序列化失败:\n%@", jsonErr.localizedDescription]);
+        return;
+    }
+    
+    NSError *writeErr = nil;
+    BOOL ok = [data writeToFile:path options:NSDataWritingAtomic error:&writeErr];
+    BOOL exists = [fm fileExistsAtPath:path];
+    
+    if (ok && exists) {
+        showTopLevelToast([NSString stringWithFormat:@"✅ 配置已保存!\n路径: %@", path]);
+    } else {
+        showTopLevelToast([NSString stringWithFormat:@"❌ 保存失败\n路径: %@\n错误: %@", 
+            path, writeErr ? writeErr.localizedDescription : @"未知错误"]);
+    }
 }
 
 static BOOL clearSkipConfig() {
+    NSString *path = getConfigPath();
     NSFileManager *fm = [NSFileManager defaultManager];
-    if ([fm fileExistsAtPath:kConfigPath]) {
+    if ([fm fileExistsAtPath:path]) {
         NSError *error = nil;
-        return [fm removeItemAtPath:kConfigPath error:&error];
+        return [fm removeItemAtPath:path error:&error];
     }
     return NO;
 }
@@ -444,13 +486,13 @@ static BOOL tryLearnFromSender(id sender, id target, SEL action) {
         g_currentMode = AI_Mode_AutoSkip;
         NSString *tc = config[@"targetClass"];
         NSString *sn = config[@"selectorName"];
-        showTopLevelToast([NSString stringWithFormat:@"🚀 AdInspector v7.3\n【自动模式】\n%@.%@\n\n双指长按=学习\n三指长按=诊断\n三指双击=清除", tc, sn]);
+        showTopLevelToast([NSString stringWithFormat:@"🚀 AdInspector v7.4\n【自动模式】\n%@.%@\n\n双指长按=学习\n三指长按=诊断\n三指双击=清除", tc, sn]);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             performAutoSkip();
         });
     } else {
         g_currentMode = AI_Mode_Observe;
-        showTopLevelToast(@"👁️ AdInspector v7.3\n【观察模式】不干预任何操作\n\n双指长按0.8s=激活学习\n三指长按0.8s=诊断视图\n三指双击=清除配置");
+        showTopLevelToast(@"👁️ AdInspector v7.4\n【观察模式】不干预任何操作\n\n双指长按0.8s=激活学习\n三指长按0.8s=诊断视图\n三指双击=清除配置");
     }
-    NSLog(@"[AdInspector] ✅ v7.3 loaded. Mode: %ld", (long)g_currentMode);
+    NSLog(@"[AdInspector] ✅ v7.4 loaded. Mode: %ld, ConfigPath: %@", (long)g_currentMode, getConfigPath());
 }

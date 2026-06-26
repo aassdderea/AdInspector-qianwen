@@ -1,4 +1,4 @@
-name: Build AdInspector Tweak (Linux)
+name: Build AdInspector Dylib
 
 on:
   push:
@@ -15,7 +15,6 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 🔥 缓存 Theos、SDK 和 Linux 工具链
       - name: Cache Theos & SDKs
         id: cache-theos
         uses: actions/cache@v4
@@ -23,31 +22,27 @@ jobs:
           path: |
             ~/theos
             ~/.theos
-          key: theos-linux-sdk-v1
+          key: theos-linux-dylib-v1
 
-      # 安装 Linux 交叉编译依赖 + Theos
       - name: Install Dependencies & Theos
         if: steps.cache-theos.outputs.cache-hit != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential fakeroot git perl xz-utils zip unzip curl \
-            libxml2-dev libssl-dev zlib1g-dev
-            
+          sudo apt-get install -y build-essential fakeroot git perl xz-utils zip unzip curl libxml2-dev libssl-dev zlib1g-dev
           bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
 
-      # 编译 Tweak（Linux 下自动使用交叉编译工具链）
-      - name: Build Package
+      # 🔥 关键变更：仅编译，不打包，彻底跳过 Filter Plist 校验
+      - name: Build Dylib Only
         run: |
           export THEOS=~/theos
-          make package FINALPACKAGE=1
+          make TARGET=iphone:clang:latest:14.0 ARCHS="arm64 arm64e"
 
-      # 上传编译产物
-      - name: Upload Artifact
+      # 🔥 上传裸 dylib 产物
+      - name: Upload Dylib Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AdInspector-Tweak-Linux
-          path: packages/*.deb
+          name: AdInspector-Dylib
+          path: .theos/obj/*/AdInspector.dylib
           retention-days: 7

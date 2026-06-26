@@ -1,4 +1,4 @@
-name: Build AdInspector Dylib
+name: Build AdInspector Tweak
 
 on:
   push:
@@ -12,36 +12,37 @@ jobs:
     runs-on: macos-13
     
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      
-    - name: Setup Theos
-      run: |
-        # 安装 Theos
-        export THEOS=/opt/theos
-        sudo mkdir -p $THEOS
-        sudo chown -R $USER:staff $THEOS
-        git clone --recursive https://github.com/theos/theos.git $THEOS
-        
-        # 安装依赖
-        brew install ldid xz
-        
-    - name: Build Dylib
-      run: |
-        export THEOS=/opt/theos
-        export PATH=$THEOS/bin:$PATH
-        
-        # 直接编译为 dylib（跳过 deb 打包）
-        make clean
-        make
-        
-        # 验证输出
-        ls -la .theos/obj/AdInspector.dylib
-        file .theos/obj/AdInspector.dylib
-        
-    - name: Upload Dylib
-      uses: actions/upload-artifact@v4
-      with:
-        name: AdInspector
-        path: .theos/obj/AdInspector.dylib
-        retention-days: 30
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 🔥 缓存 Theos 和 iOS SDK，避免每次重新下载触发 API 限流
+      - name: Cache Theos & SDKs
+        id: cache-theos
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/theos
+            ~/.theos
+          key: theos-macos13-sdk-v1
+
+      # 仅在缓存未命中时安装 Theos 和 SDK
+      - name: Install Theos & SDKs
+        if: steps.cache-theos.outputs.cache-hit != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+
+      # 编译 Tweak
+      - name: Build Package
+        run: |
+          export THEOS=~/theos
+          make package FINALPACKAGE=1
+
+      # 上传编译产物
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AdInspector-Tweak
+          path: packages/*.deb
+          retention-days: 7

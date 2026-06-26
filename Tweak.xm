@@ -51,19 +51,16 @@ static void showTopLevelToast(NSString *message) {
 
 // ========== ✅ 配置管理（使用 App Documents 目录）==========
 static NSString* getConfigPath() {
-    // 优先使用 Documents 目录（App 有完整读写权限）
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *docDir = paths.firstObject;
     if (docDir) {
         return [docDir stringByAppendingPathComponent:@"AdInspector_SkipConfig.json"];
     }
-    // 兜底：Caches 目录
     NSArray *cachePaths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
     NSString *cacheDir = cachePaths.firstObject;
     if (cacheDir) {
         return [cacheDir stringByAppendingPathComponent:@"AdInspector_SkipConfig.json"];
     }
-    // 最终兜底：tmp 目录（重启后可能被清理）
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"AdInspector_SkipConfig.json"];
 }
 
@@ -76,8 +73,6 @@ static NSDictionary* loadSkipConfig() {
 
 static void saveSkipConfig(NSString *targetClass, NSString *selectorName) {
     NSString *path = getConfigPath();
-    
-    // ✅ 确保父目录存在
     NSString *dir = [path stringByDeletingLastPathComponent];
     NSFileManager *fm = [NSFileManager defaultManager];
     if (![fm fileExistsAtPath:dir]) {
@@ -144,6 +139,36 @@ static NSArray<NSString *> *extractGestureActions(UIGestureRecognizer *gr) {
     return results;
 }
 
+static NSString* extractAllTextFromView(UIView *view) {
+    NSMutableString *allText = [NSMutableString string];
+    if ([view isKindOfClass:[UIButton class]]) {
+        UIButton *btn = (UIButton *)view;
+        for (NSNumber *stateNum in @[@(UIControlStateNormal), @(UIControlStateHighlighted), @(UIControlStateSelected)]) {
+            NSString *t = [btn titleForState:[stateNum unsignedIntegerValue]];
+            if (t) [allText appendString:t];
+            NSAttributedString *at = [btn attributedTitleForState:[stateNum unsignedIntegerValue]];
+            if (at) [allText appendString:at.string];
+        }
+    } else if ([view isKindOfClass:[UILabel class]]) {
+        UILabel *lbl = (UILabel *)view;
+        if (lbl.text) [allText appendString:lbl.text];
+        if (lbl.attributedText) [allText appendString:lbl.attributedText.string];
+    }
+    return allText;
+}
+
+// ✅ 递归提取视图树中所有文本
+static NSString* extractAllTextRecursive(UIView *view) {
+    NSMutableString *result = [NSMutableString string];
+    NSString *selfText = extractAllTextFromView(view);
+    if (selfText.length > 0) [result appendString:selfText];
+    for (UIView *sub in view.subviews) {
+        NSString *subText = extractAllTextRecursive(sub);
+        if (subText.length > 0) [result appendString:subText];
+    }
+    return result;
+}
+
 static void inspectViewAtPoint(CGPoint point) {
     UIWindow *keyWindow = nil;
     for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -172,11 +197,39 @@ static void inspectViewAtPoint(CGPoint point) {
     }
     for (UIGestureRecognizer *gr in hitView.gestureRecognizers) [actions addObjectsFromArray:extractGestureActions(gr)];
     
-    NSDictionary *result = @{@"hierarchyChain": chain, @"targetActions": actions, @"extraInfo": @{
+    // ✅ 如果命中了 UICollectionView，额外收集所有可见 Cell 的信息
+    NSMutableArray *cellInfos = nil;
+    if ([hitView isKindOfClass:[UICollectionView class]]) {
+        UICollectionView *cv = (UICollectionView *)hitView;
+        cellInfos = [NSMutableArray array];
+        for (UICollectionViewCell *cell in cv.visibleCells) {
+            NSString *cellText = extractAllTextRecursive(cell);
+            BOOL hasGesture = (cell.gestureRecognizers.count > 0 || cell.contentView.gestureRecognizers.count > 0);
+            NSIndexPath *ip = [cv indexPathForCell:cell];
+            [cellInfos addObject:@{
+                @"class": NSStringFromClass([cell class]),
+                @"indexPath": ip ? [NSString stringWithFormat:@"%ld-%ld", (long)ip.section, (long)ip.item] : @"unknown",
+                @"text": cellText.length > 0 ? cellText : @"(empty)",
+                @"frame": NSStringFromCGRect(cell.frame),
+                @"hasGesture": @(hasGesture)
+            }];
+        }
+    }
+    
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    result[@"hierarchyChain"] = chain;
+    result[@"targetActions"] = actions;
+    result[@"extraInfo"] = @{
         @"frame": NSStringFromCGRect(hitView.frame),
         @"windowFrame": NSStringFromCGRect([hitView convertRect:hitView.bounds toView:nil]),
-        @"isHidden": @(hitView.isHidden), @"alpha": @(hitView.alpha), @"userInteractionEnabled": @(hitView.userInteractionEnabled)
-    }};
+        @"isHidden": @(hitView.isHidden),
+        @"alpha": @(hitView.alpha),
+        @"userInteractionEnabled": @(hitView.userInteractionEnabled)
+    };
+    if (cellInfos) {
+        result[@"visibleCells"] = cellInfos;
+    }
+    
     NSError *error = nil;
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted error:&error];
     if (jsonData) {
@@ -210,24 +263,6 @@ static BOOL isSkipRelatedText(NSString *text) {
            [lower containsString:@"close"] || 
            [lower containsString:@"关闭"] || 
            [lower containsString:@"dismiss"];
-}
-
-static NSString* extractAllTextFromView(UIView *view) {
-    NSMutableString *allText = [NSMutableString string];
-    if ([view isKindOfClass:[UIButton class]]) {
-        UIButton *btn = (UIButton *)view;
-        for (NSNumber *stateNum in @[@(UIControlStateNormal), @(UIControlStateHighlighted), @(UIControlStateSelected)]) {
-            NSString *t = [btn titleForState:[stateNum unsignedIntegerValue]];
-            if (t) [allText appendString:t];
-            NSAttributedString *at = [btn attributedTitleForState:[stateNum unsignedIntegerValue]];
-            if (at) [allText appendString:at.string];
-        }
-    } else if ([view isKindOfClass:[UILabel class]]) {
-        UILabel *lbl = (UILabel *)view;
-        if (lbl.text) [allText appendString:lbl.text];
-        if (lbl.attributedText) [allText appendString:lbl.attributedText.string];
-    }
-    return allText;
 }
 
 static UIView* findTargetSubview(UIView *root, Class targetCls) {
@@ -293,6 +328,28 @@ static void performAutoSkip() {
             if (!retry) showTopLevelToast(@"ℹ️ 未找到跳过按钮\n广告可能尚未加载");
         });
     }
+}
+
+// ✅ 从 CollectionView 可见 Cell 中匹配跳过文本并保存配置
+static BOOL tryLearnFromCollectionView(UICollectionView *cv, id target, SEL action) {
+    if (g_currentMode != AI_Mode_LearnArmed) return NO;
+    
+    for (UICollectionViewCell *cell in cv.visibleCells) {
+        NSString *cellText = extractAllTextRecursive(cell);
+        if (isSkipRelatedText(cellText)) {
+            NSString *tc = NSStringFromClass([target class]);
+            NSString *sn = NSStringFromSelector(action);
+            saveSkipConfig(tc, sn);
+            g_currentMode = AI_Mode_Observe;
+            
+            UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+            [fb impactOccurred];
+            showTopLevelToast([NSString stringWithFormat:@"✅ CV Cell匹配成功!\n%@.%@\ntext: %@", tc, sn, cellText]);
+            NSLog(@"[AdInspector] ✅ Learned via CV: %@.%@ (text: %@)", tc, sn, cellText);
+            return YES;
+        }
+    }
+    return NO;
 }
 
 static BOOL tryLearnFromSender(id sender, id target, SEL action) {
@@ -438,6 +495,16 @@ static BOOL tryLearnFromSender(id sender, id target, SEL action) {
 }
 %end
 
+// ✅ Hook UICollectionViewDelegate - 捕获百度联盟等 SDK 的 Cell 点击
+%hook NSObject
+- (void)collectionView:(UICollectionView *)cv didSelectItemAtIndexPath:(NSIndexPath *)ip {
+    %orig;
+    if (g_currentMode == AI_Mode_LearnArmed && [cv isKindOfClass:[UICollectionView class]]) {
+        tryLearnFromCollectionView(cv, self, _cmd);
+    }
+}
+%end
+
 %hook UIGestureRecognizer
 - (void)setState:(UIGestureRecognizerState)state {
     %orig;
@@ -454,10 +521,10 @@ static BOOL tryLearnFromSender(id sender, id target, SEL action) {
                         SEL sel = NSSelectorFromString(selPart);
                         if (target && [target respondsToSelector:sel]) {
                             UIView *grView = self.view;
-                            NSString *viewText = extractAllTextFromView(grView);
+                            NSString *viewText = extractAllTextRecursive(grView);
                             BOOL matched = isSkipRelatedText(viewText);
                             if (!matched && grView.superview) {
-                                viewText = extractAllTextFromView(grView.superview);
+                                viewText = extractAllTextRecursive(grView.superview);
                                 matched = isSkipRelatedText(viewText);
                             }
                             if (matched) {
@@ -486,13 +553,13 @@ static BOOL tryLearnFromSender(id sender, id target, SEL action) {
         g_currentMode = AI_Mode_AutoSkip;
         NSString *tc = config[@"targetClass"];
         NSString *sn = config[@"selectorName"];
-        showTopLevelToast([NSString stringWithFormat:@"🚀 AdInspector v7.4\n【自动模式】\n%@.%@\n\n双指长按=学习\n三指长按=诊断\n三指双击=清除", tc, sn]);
+        showTopLevelToast([NSString stringWithFormat:@"🚀 AdInspector v7.5\n【自动模式】\n%@.%@\n\n双指长按=学习\n三指长按=诊断\n三指双击=清除", tc, sn]);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             performAutoSkip();
         });
     } else {
         g_currentMode = AI_Mode_Observe;
-        showTopLevelToast(@"👁️ AdInspector v7.4\n【观察模式】不干预任何操作\n\n双指长按0.8s=激活学习\n三指长按0.8s=诊断视图\n三指双击=清除配置");
+        showTopLevelToast(@"👁️ AdInspector v7.5\n【观察模式】不干预任何操作\n\n双指长按0.8s=激活学习\n三指长按0.8s=诊断视图\n三指双击=清除配置");
     }
-    NSLog(@"[AdInspector] ✅ v7.4 loaded. Mode: %ld, ConfigPath: %@", (long)g_currentMode, getConfigPath());
+    NSLog(@"[AdInspector] ✅ v7.5 loaded. Mode: %ld, ConfigPath: %@", (long)g_currentMode, getConfigPath());
 }

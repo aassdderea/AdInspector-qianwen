@@ -1,363 +1,107 @@
 #import <UIKit/UIKit.h>
-#import <objc/runtime.h>
+#import <Foundation/Foundation.h>
 
-// ==================== 工具函数前置声明 ====================
-static NSString *getControlEventName(UIControlEvents event);
-static void saveToFile(NSString *log);
-static void analyzeTouchView(UIView *view, CGPoint touchPoint);
-static void highlightView(UIView *view);
+// ========== 配置管理 ==========
+static NSString *const kConfigPath = @"/var/mobile/AdInspector_SkipConfig.json";
 
-// ==================== 分析防抖 ====================
-static NSDate *s_lastAnalysisTime = nil;
-static const NSTimeInterval kMinAnalysisInterval = 0.3;
-
-// ==================== 悬浮窗 ====================
-@interface AdInspectorWindow : UIWindow
-@property (nonatomic, strong) UITextView *logTextView;
-@property (nonatomic, strong) NSMutableString *logBuffer;
-+ (instancetype)shared;
-- (void)showLog:(NSString *)log;
-@end
-
-@implementation AdInspectorWindow
-
-+ (instancetype)shared {
-    static AdInspectorWindow *instance = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        instance = [[AdInspectorWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    });
-    return instance;
+static NSDictionary* loadSkipConfig() {
+    NSData *data = [NSData dataWithContentsOfFile:kConfigPath];
+    if (!data) return nil;
+    return [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
 }
 
-- (instancetype)initWithFrame:(CGRect)frame {
-    CGFloat w = frame.size.width;
-    self = [super initWithFrame:CGRectMake(5, 80, w - 10, 280)];
-    if (self) {
-        self.windowLevel = UIWindowLevelAlert + 999;
-        self.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.88];
-        self.layer.cornerRadius = 10;
-        self.layer.borderWidth = 1.5;
-        self.layer.borderColor = [UIColor cyanColor].CGColor;
-        self.layer.shadowColor = [UIColor blackColor].CGColor;
-        self.layer.shadowOffset = CGSizeMake(0, 2);
-        self.layer.shadowOpacity = 0.6;
-        self.hidden = NO;
-        self.userInteractionEnabled = YES;
-        self.clipsToBounds = NO;
-        
-        // 标题
-        UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(12, 8, 200, 20)];
-        title.text = @"🔍 AdInspector";
-        title.textColor = [UIColor cyanColor];
-        title.font = [UIFont boldSystemFontOfSize:14];
-        [self addSubview:title];
-        
-        // 关闭
-        UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
-        close.frame = CGRectMake(self.bounds.size.width - 45, 3, 40, 30);
-        [close setTitle:@"✕" forState:UIControlStateNormal];
-        [close setTitleColor:[UIColor redColor] forState:UIControlStateNormal];
-        close.titleLabel.font = [UIFont boldSystemFontOfSize:20];
-        [close addTarget:self action:@selector(hideSelf) forControlEvents:UIControlEventTouchUpInside];
-        [self addSubview:close];
-        
-        // 拖动手柄
-        UIView *handle = [[UIView alloc] initWithFrame:CGRectMake(self.bounds.size.width/2 - 15, 4, 30, 4)];
-        handle.backgroundColor = [UIColor colorWithWhite:0.4 alpha:0.6];
-        handle.layer.cornerRadius = 2;
-        [self addSubview:handle];
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
-        [self addGestureRecognizer:pan];
-        
-        // 日志区
-        CGFloat tvY = 32;
-        self.logTextView = [[UITextView alloc] initWithFrame:CGRectMake(5, tvY, self.bounds.size.width - 10, self.bounds.size.height - tvY - 5)];
-        self.logTextView.backgroundColor = [UIColor clearColor];
-        self.logTextView.textColor = [UIColor greenColor];
-        self.logTextView.font = [UIFont fontWithName:@"Courier" size:10] ?: [UIFont systemFontOfSize:10];
-        self.logTextView.editable = NO;
-        self.logTextView.selectable = YES;
-        self.logTextView.indicatorStyle = UIScrollViewIndicatorStyleWhite;
-        self.logTextView.textContainerInset = UIEdgeInsetsMake(2, 2, 2, 2);
-        [self addSubview:self.logTextView];
-        
-        self.logBuffer = [NSMutableString string];
-    }
-    return self;
+static void saveSkipConfig(NSString *targetClass, NSString *selectorName, NSInteger windowTag) {
+    NSDictionary *config = @{
+        @"targetClass": targetClass ?: @"",
+        @"selectorName": selectorName ?: @"",
+        @"windowTag": @(windowTag),
+        @"learnedAt": @([[NSDate date] timeIntervalSince1970])
+    };
+    NSData *data = [NSJSONSerialization dataWithJSONObject:config options:NSJSONWritingPrettyPrinted error:nil];
+    [data writeToFile:kConfigPath atomically:YES];
+    NSLog(@"[AdInspector] ✅ Skip config saved: %@.%@ (tag:%ld)", targetClass, selectorName, (long)windowTag);
 }
 
-- (void)handlePan:(UIPanGestureRecognizer *)pan {
-    CGPoint t = [pan translationInView:self];
-    self.center = CGPointMake(self.center.x + t.x, self.center.y + t.y);
-    [pan setTranslation:CGPointZero inView:self];
-}
-
-- (void)hideSelf {
-    self.hidden = YES;
-}
-
-- (void)showLog:(NSString *)log {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self.logBuffer appendString:log];
-        if (self.logBuffer.length > 8000) {
-            [self.logBuffer deleteCharactersInRange:NSMakeRange(0, self.logBuffer.length - 8000)];
-        }
-        self.logTextView.text = self.logBuffer;
-        if (self.logTextView.text.length > 0) {
-            [self.logTextView scrollRangeToVisible:NSMakeRange(self.logTextView.text.length - 1, 1)];
-        }
-        self.hidden = NO;
-    });
-}
-@end
-
-// ==================== C 工具函数 ====================
-
-static NSString *getControlEventName(UIControlEvents e) {
-    switch (e) {
-        case UIControlEventTouchDown:           return @"TouchDown";
-        case UIControlEventTouchDownRepeat:     return @"TouchDownRepeat";
-        case UIControlEventTouchDragInside:     return @"DragInside";
-        case UIControlEventTouchDragOutside:    return @"DragOutside";
-        case UIControlEventTouchUpInside:       return @"TouchUpInside";
-        case UIControlEventTouchUpOutside:      return @"TouchUpOutside";
-        case UIControlEventTouchCancel:         return @"TouchCancel";
-        case UIControlEventValueChanged:        return @"ValueChanged";
-        case UIControlEventPrimaryActionTriggered: return @"PrimaryAction";
-        case UIControlEventEditingDidBegin:     return @"EditingBegin";
-        case UIControlEventEditingDidEnd:       return @"EditingEnd";
-        default: return [NSString stringWithFormat:@"Evt%lu", (unsigned long)e];
-    }
-}
-
-static void saveToFile(NSString *log) {
-    @try {
-        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-        if (paths.count == 0) return;
-        NSString *path = [paths[0] stringByAppendingPathComponent:@"AdInspector_Logs.txt"];
-        if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
-            [[NSData data] writeToFile:path atomically:YES];
-        }
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
-        if (fh) {
-            [fh seekToEndOfFile];
-            [fh writeData:[log dataUsingEncoding:NSUTF8StringEncoding]];
-            [fh closeFile];
-        }
-    } @catch (NSException *e) {
-        NSLog(@"[AdInspector] 写入失败: %@", e);
-    }
-}
-
-static void highlightView(UIView *view) {
-    if (!view) return;
+// ========== 学习态：全局拦截按钮点击 ==========
+%hook UIApplication
+- (BOOL)sendAction:(SEL)action to:(id)target from:(id)sender forEvent:(UIEvent *)event {
+    BOOL result = %orig;
     
-    // 安全保存旧边框：用 NSValue 包装 UIColor
-    UIColor *oldColor = nil;
-    CGColorRef oldCG = view.layer.borderColor;
-    if (oldCG != NULL) {
-        oldColor = [UIColor colorWithCGColor:oldCG];
-    }
-    CGFloat oldWidth = view.layer.borderWidth;
-    
-    view.layer.borderColor = [UIColor redColor].CGColor;
-    view.layer.borderWidth = 3.0;
-    
-    __weak UIView *wv = view;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        __strong UIView *sv = wv;
-        if (sv) {
-            // 恢复：使用保存的 UIColor 对象，保证 CGColor 有效
-            sv.layer.borderColor = oldColor ? oldColor.CGColor : NULL;
-            sv.layer.borderWidth = oldWidth;
+    // 仅在未学习时激活监听
+    if (!loadSkipConfig() && [sender isKindOfClass:[UIButton class]]) {
+        UIButton *btn = (UIButton *)sender;
+        NSString *title = [btn titleForState:UIControlStateNormal];
+        
+        // 通过标题关键词识别跳过按钮（兼容"跳过 4"/"跳过"/"Skip"等）
+        if ([title containsString:@"跳过"] || [title containsString:@"Skip"]) {
+            NSString *targetClassName = NSStringFromClass([target class]);
+            NSString *selectorName = NSStringFromSelector(action);
+            
+            // 向上查找广告 Window 的 tag
+            NSInteger windowTag = 0;
+            UIWindow *win = btn.window;
+            while (win && ![win isKindOfClass:%c(BDNCSplashAdvertiseBaseWindow)]) {
+                win = win.parentWindow; // iOS 15+ 可用，低版本需遍历 superview
+            }
+            if (win) windowTag = win.tag;
+            
+            saveSkipConfig(targetClassName, selectorName, windowTag);
+            
+            // 震动反馈提示学习成功
+            UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+            [feedback impactOccurred];
         }
-    });
+    }
+    return result;
 }
+%end
 
-static void analyzeTouchView(UIView *view, CGPoint point) {
-    if (!view) return;
-    
-    // 防重复（主线程，无需加锁）
-    NSDate *now = [NSDate date];
-    if (s_lastAnalysisTime && [now timeIntervalSinceDate:s_lastAnalysisTime] < kMinAnalysisInterval) {
+// ========== 执行态：自动跳过 ==========
+%ctor {
+    NSDictionary *config = loadSkipConfig();
+    if (!config) {
+        NSLog(@"[AdInspector] 🎓 No config found. Learning mode active.");
         return;
     }
-    s_lastAnalysisTime = now;
     
-    @try {
-        NSMutableString *out = [NSMutableString string];
+    NSString *targetClass = config[@"targetClass"];
+    NSString *selectorName = config[@"selectorName"];
+    NSInteger windowTag = [config[@"windowTag"] integerValue];
+    
+    NSLog(@"[AdInspector] 🚀 Auto-skip loaded: %@.%@ (tag:%ld)", targetClass, selectorName, (long)windowTag);
+    
+    // 延迟执行，等待广告 Window 创建
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        Class cls = NSClassFromString(targetClass);
+        SEL sel = NSSelectorFromString(selectorName);
         
-        // 时间戳
-        [out appendFormat:@"\n══════ %@ ══════\n",
-         [NSDateFormatter localizedStringFromDate:now dateStyle:NSDateFormatterNoStyle timeStyle:NSDateFormatterMediumStyle]];
-        
-        // ========== 1. hierarchyChain ==========
-        [out appendString:@"📊 视图层级链:\n"];
-        UIView *cur = view;
-        int depth = 0;
-        while (cur && depth < 15) {
-            NSString *indent = [@"" stringByPaddingToLength:depth*2 withString:@" " startingAtIndex:0];
-            [out appendFormat:@"%@▸ %@", indent, NSStringFromClass([cur class])];
-            
-            // 附加属性
-            NSMutableArray *tags = [NSMutableArray array];
-            if (cur.tag != 0) [tags addObject:[NSString stringWithFormat:@"tag:%ld", (long)cur.tag]];
-            if ([cur isKindOfClass:[UIButton class]]) {
-                NSString *t = [(UIButton *)cur titleForState:UIControlStateNormal];
-                if (t.length) [tags addObject:[NSString stringWithFormat:@"\"%@\"", t]];
-            }
-            if ([cur isKindOfClass:[UILabel class]]) {
-                NSString *t = [(UILabel *)cur text];
-                if (t.length > 20) t = [[t substringToIndex:20] stringByAppendingString:@"..."];
-                if (t.length) [tags addObject:[NSString stringWithFormat:@"\"%@\"", t]];
-            }
-            if (cur.accessibilityLabel.length) {
-                [tags addObject:[NSString stringWithFormat:@"a11y:\"%@\"", cur.accessibilityLabel]];
-            }
-            if (tags.count) {
-                [out appendFormat:@" [%@]", [tags componentsJoinedByString:@", "]];
-            }
-            [out appendFormat:@"\n%@  %@\n", indent, NSStringFromCGRect(cur.frame)];
-            
-            cur = cur.superview;
-            depth++;
+        if (!cls || ![cls instancesRespondToSelector:sel]) {
+            NSLog(@"[AdInspector] ⚠️ Learned config invalid. Delete %@ to relearn.", kConfigPath);
+            return;
         }
         
-        // ========== 2. targetActions ==========
-        [out appendString:@"\n🎯 Target-Action & 手势:\n"];
-        BOOL found = NO;
-        cur = view;
-        depth = 0;
-        while (cur && depth < 8) {
-            if ([cur isKindOfClass:[UIControl class]]) {
-                UIControl *c = (UIControl *)cur;
-                for (id tgt in c.allTargets) {
-                    UIControlEvents checkEvents[] = {
-                        UIControlEventTouchUpInside,
-                        UIControlEventTouchDown,
-                        UIControlEventValueChanged,
-                        UIControlEventPrimaryActionTriggered
+        // 通过 Window tag 精确定位广告实例
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            for (UIWindow *win in scene.windows) {
+                if (win.tag == windowTag) {
+                    // 递归查找目标 view 并触发
+                    __block UIView *targetView = nil;
+                    void (^findSubview)(UIView *) = ^(UIView *v) {
+                        if ([v isKindOfClass:cls]) targetView = v;
+                        for (UIView *sub in v.subviews) findSubview(sub);
                     };
-                    for (int i = 0; i < 4; i++) {
-                        NSArray *acts = [c actionsForTarget:tgt forControlEvent:checkEvents[i]];
-                        if (acts.count) {
-                            found = YES;
-                            [out appendFormat:@"  [%@] → %@.%@ (%@)\n",
-                             NSStringFromClass([cur class]),
-                             NSStringFromClass([tgt class]),
-                             acts[0],
-                             getControlEventName(checkEvents[i])];
-                        }
+                    findSubview(win.rootViewController.view);
+                    
+                    if (targetView) {
+                        #pragma clang diagnostic push
+                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                        [targetView performSelector:sel withObject:nil];
+                        #pragma clang diagnostic pop
+                        NSLog(@"[AdInspector] ✅ Auto-skip triggered!");
                     }
+                    break;
                 }
             }
-            
-            for (UIGestureRecognizer *gr in cur.gestureRecognizers) {
-                found = YES;
-                [out appendFormat:@"  [%@] 手势:%@ (en:%d ct:%d)\n",
-                 NSStringFromClass([cur class]),
-                 NSStringFromClass([gr class]),
-                 gr.enabled,
-                 gr.cancelsTouchesInView];
-                @try {
-                    if ([gr respondsToSelector:NSSelectorFromString(@"_targets")]) {
-                        NSArray *tgts = [gr valueForKey:@"_targets"];
-                        for (id t in tgts) {
-                            [out appendFormat:@"    → %@\n", t];
-                        }
-                    }
-                } @catch (...) {}
-            }
-            
-            cur = cur.superview;
-            depth++;
         }
-        if (!found) [out appendString:@"  (未检测到绑定)\n"];
-        
-        // ========== 3. extraInfo ==========
-        [out appendString:@"\n🔍 诊断信息:\n"];
-        [out appendFormat:@"  类: %@\n", NSStringFromClass([view class])];
-        [out appendFormat:@"  frame: %@\n", NSStringFromCGRect(view.frame)];
-        [out appendFormat:@"  bounds: %@\n", NSStringFromCGRect(view.bounds)];
-        [out appendFormat:@"  userInteraction:%d hidden:%d alpha:%.2f\n",
-         view.userInteractionEnabled, view.hidden, view.alpha];
-        [out appendFormat:@"  backgroundColor: %@\n", view.backgroundColor ?: @"nil"];
-        
-        if (view.gestureRecognizers.count) {
-            [out appendString:@"  视图手势: "];
-            for (UIGestureRecognizer *gr in view.gestureRecognizers) {
-                [out appendFormat:@"%@ ", NSStringFromClass([gr class])];
-            }
-            [out appendString:@"\n"];
-        }
-        
-        // 响应链
-        [out appendString:@"  响应链: "];
-        UIResponder *r = view.nextResponder;
-        int rc = 0;
-        while (r && rc < 6) {
-            [out appendFormat:@"→%@ ", NSStringFromClass([r class])];
-            r = r.nextResponder;
-            rc++;
-        }
-        [out appendString:@"\n"];
-        [out appendString:@"══════════════════════════\n"];
-        
-        // 输出
-        [[AdInspectorWindow shared] showLog:out];
-        saveToFile(out);
-        highlightView(view);
-        
-    } @catch (NSException *e) {
-        NSLog(@"[AdInspector] 分析异常: %@", e);
-    }
-}
-
-// ==================== Hook 实现 ====================
-%hook UIWindow
-- (void)sendEvent:(UIEvent *)event {
-    %orig;
-    if (event.type == UIEventTypeTouches) {
-        NSSet *touches = [event allTouches];
-        if (touches.count == 1) {
-            UITouch *touch = [touches anyObject];
-            if (touch.phase == UITouchPhaseEnded && touch.view) {
-                analyzeTouchView(touch.view, [touch locationInView:nil]);
-            }
-        }
-    }
-}
-%end
-
-%hook UIControl
-- (void)addTarget:(id)target action:(SEL)action forControlEvents:(UIControlEvents)controlEvents {
-    NSLog(@"[AdInspector] 🔗 %@ → %@.%@ [%@]",
-          NSStringFromClass([self class]),
-          NSStringFromClass([target class]),
-          NSStringFromSelector(action),
-          getControlEventName(controlEvents));
-    %orig;
-}
-%end
-
-// ==================== 初始化 ====================
-%ctor {
-    // 等App完全启动后再显示悬浮窗
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [AdInspectorWindow shared];
-        NSLog(@"[AdInspector] ✅ 已激活 - 点击任意视图查看分析");
-        
-        @try {
-            NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-            if (paths.count > 0) {
-                NSString *path = [paths[0] stringByAppendingPathComponent:@"AdInspector_Logs.txt"];
-                NSString *header = [NSString stringWithFormat:@"\n=== AdInspector v1.0 [%@] ===\n",
-                                   [NSDateFormatter localizedStringFromDate:[NSDate date]
-                                                                  dateStyle:NSDateFormatterShortStyle
-                                                                  timeStyle:NSDateFormatterMediumStyle]];
-                [header writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-            }
-        } @catch (...) {}
     });
 }

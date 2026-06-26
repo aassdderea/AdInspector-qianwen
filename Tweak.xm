@@ -22,6 +22,16 @@ static void saveSkipConfig(NSString *targetClass, NSString *selectorName, NSInte
     NSLog(@"[AdInspector] ✅ Skip config saved: %@.%@ (tag:%ld)", targetClass, selectorName, (long)windowTag);
 }
 
+// ✅ 修复：使用传统 C 函数替代递归 Block，彻底消除 ARC 循环引用编译报错
+static UIView* findTargetSubview(UIView *root, Class targetCls) {
+    if ([root isKindOfClass:targetCls]) return root;
+    for (UIView *sub in root.subviews) {
+        UIView *found = findTargetSubview(sub, targetCls);
+        if (found) return found;
+    }
+    return nil;
+}
+
 // ========== 学习态：全局拦截按钮点击 ==========
 %hook UIApplication
 - (BOOL)sendAction:(SEL)action to:(id)target from:(id)sender forEvent:(UIEvent *)event {
@@ -80,22 +90,9 @@ static void saveSkipConfig(NSString *targetClass, NSString *selectorName, NSInte
         for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
             for (UIWindow *win in scene.windows) {
                 if (win.tag == windowTag) {
-                    __block UIView *targetView = nil;
-                    
-                    // ✅ 修复：添加 __block 修饰符，解决递归 Block 自引用编译报错
-                    __block void (^findSubview)(UIView *) = ^(UIView *v) {
-                        if ([v isKindOfClass:cls]) {
-                            targetView = v;
-                            return; // 找到后立即返回，避免无效遍历
-                        }
-                        for (UIView *sub in v.subviews) {
-                            findSubview(sub);
-                            if (targetView) return; // 子树已找到，提前退出
-                        }
-                    };
-                    
+                    UIView *targetView = nil;
                     if (win.rootViewController.view) {
-                        findSubview(win.rootViewController.view);
+                        targetView = findTargetSubview(win.rootViewController.view, cls);
                     }
                     
                     if (targetView) {
@@ -105,9 +102,6 @@ static void saveSkipConfig(NSString *targetClass, NSString *selectorName, NSInte
                         #pragma clang diagnostic pop
                         NSLog(@"[AdInspector] ✅ Auto-skip triggered!");
                     }
-                    
-                    // ✅ 修复：释放 Block 引用，防止循环引用导致内存泄漏
-                    findSubview = nil;
                     break;
                 }
             }

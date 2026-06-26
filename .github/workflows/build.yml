@@ -1,4 +1,4 @@
-name: Build AdInspector Tweak
+name: Build AdInspector Tweak (Linux)
 
 on:
   push:
@@ -9,13 +9,13 @@ on:
 
 jobs:
   build:
-    runs-on: macos-13
+    runs-on: ubuntu-latest
     
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 🔥 缓存 Theos 和 iOS SDK，避免每次重新下载触发 API 限流
+      # 🔥 缓存 Theos、SDK 和 Linux 工具链
       - name: Cache Theos & SDKs
         id: cache-theos
         uses: actions/cache@v4
@@ -23,17 +23,22 @@ jobs:
           path: |
             ~/theos
             ~/.theos
-          key: theos-macos13-sdk-v1
+          key: theos-linux-sdk-v1
 
-      # 仅在缓存未命中时安装 Theos 和 SDK
-      - name: Install Theos & SDKs
+      # 安装 Linux 交叉编译依赖 + Theos
+      - name: Install Dependencies & Theos
         if: steps.cache-theos.outputs.cache-hit != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential fakeroot git perl xz-utils zip unzip curl \
+            libxml2-dev libssl-dev zlib1g-dev
+            
           bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
 
-      # 编译 Tweak
+      # 编译 Tweak（Linux 下自动使用交叉编译工具链）
       - name: Build Package
         run: |
           export THEOS=~/theos
@@ -43,6 +48,6 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AdInspector-Tweak
+          name: AdInspector-Tweak-Linux
           path: packages/*.deb
           retention-days: 7

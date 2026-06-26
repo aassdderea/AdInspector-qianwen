@@ -47,7 +47,7 @@ static void showTopLevelToast(NSString *message) {
                 g_toastWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
                 g_toastWindow.windowLevel = UIWindowLevelAlert + 999.f;
                 g_toastWindow.backgroundColor = [UIColor clearColor];
-                g_toastWindow.userInteractionEnabled = NO; // ✅ 绝不拦截触摸
+                g_toastWindow.userInteractionEnabled = NO;
                 
                 g_toastLabel = [[UILabel alloc] init];
                 g_toastLabel.numberOfLines = 0;
@@ -71,7 +71,8 @@ static void showTopLevelToast(NSString *message) {
             g_toastWindow.hidden = NO;
             
             if (g_hideBlock) { dispatch_block_cancel(g_hideBlock); g_hideBlock = nil; }
-            g_hideBlock = dispatch_block_create(0, ^{
+            // ✅ 修复：显式转换 dispatch_block_flags_t
+            g_hideBlock = dispatch_block_create((dispatch_block_flags_t)0, ^{
                 g_toastWindow.hidden = YES;
                 g_hideBlock = nil;
             });
@@ -82,7 +83,7 @@ static void showTopLevelToast(NSString *message) {
     });
 }
 
-// ========== 手势解析 & 视图诊断（原始安全实现）==========
+// ========== 手势解析 & 视图诊断 ==========
 static NSArray<NSString *> *extractGestureActions(UIGestureRecognizer *gr) {
     NSMutableArray *results = [NSMutableArray array];
     @try {
@@ -147,21 +148,17 @@ static void inspectViewAtPoint(CGPoint point) {
     }
 }
 
-// ========== ✅ 核心状态机：观察 / 单次学习捕获 / 自动执行 ==========
+// ========== 核心状态机 ==========
 typedef NS_ENUM(NSInteger, AI_Mode) {
-    AI_Mode_Observe = 0,      // 纯观察，不拦截任何点击
-    AI_Mode_LearnArmed,       // 已激活学习捕获，等待下一次跳过按钮点击
-    AI_Mode_AutoSkip          // 自动跳过模式
+    AI_Mode_Observe = 0,
+    AI_Mode_LearnArmed,
+    AI_Mode_AutoSkip
 };
 
 static AI_Mode g_currentMode = AI_Mode_Observe;
-
-// 三指长按诊断状态
 static BOOL g_isThreeFingerHolding = NO;
 static CGPoint g_trackedPoint = CGPointZero;
 static dispatch_block_t g_inspectBlock = nil;
-
-// 双指长按激活学习状态
 static BOOL g_isTwoFingerHolding = NO;
 static dispatch_block_t g_learnArmBlock = nil;
 
@@ -233,7 +230,6 @@ static void performAutoSkip() {
 // ========== 全局 Hook ==========
 %hook UIApplication
 
-// ✅ 手势状态机：三指长按诊断 / 双指长按激活学习 / 三指双击清除配置
 - (void)sendEvent:(UIEvent *)event {
     %orig;
     if (event.type != UIEventTypeTouches) return;
@@ -259,7 +255,8 @@ static void performAutoSkip() {
         UITouch *anyTouch = touches.anyObject;
         if (anyTouch.phase == UITouchPhaseBegan && !g_isTwoFingerHolding) {
             g_isTwoFingerHolding = YES;
-            g_learnArmBlock = dispatch_block_create(0, ^{
+            // ✅ 修复：显式转换 dispatch_block_flags_t
+            g_learnArmBlock = dispatch_block_create((dispatch_block_flags_t)0, ^{
                 g_currentMode = AI_Mode_LearnArmed;
                 showTopLevelToast(@"🎯 学习捕获已激活!\n请点击广告【跳过】按钮");
                 UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
@@ -268,8 +265,6 @@ static void performAutoSkip() {
                 g_learnArmBlock = nil;
             });
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), g_learnArmBlock);
-        } else if (g_isTwoFingerHolding) {
-            // 持续按住，更新状态
         }
     } else {
         if (g_isTwoFingerHolding && g_learnArmBlock) {
@@ -279,7 +274,7 @@ static void performAutoSkip() {
         }
     }
     
-    // --- 三指长按 0.8s 诊断（原始逻辑）---
+    // --- 三指长按 0.8s 诊断 ---
     if (count == 3) {
         CGPoint centerPoint = CGPointZero;
         NSInteger validCount = 0;
@@ -293,7 +288,8 @@ static void performAutoSkip() {
         if (anyTouch.phase == UITouchPhaseBegan && !g_isThreeFingerHolding) {
             g_isThreeFingerHolding = YES;
             g_trackedPoint = centerPoint;
-            g_inspectBlock = dispatch_block_create(0, ^{
+            // ✅ 修复：显式转换 dispatch_block_flags_t
+            g_inspectBlock = dispatch_block_create((dispatch_block_flags_t)0, ^{
                 inspectViewAtPoint(g_trackedPoint);
                 dispatch_async(dispatch_get_main_queue(), ^{
                     @try { UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; [fb prepare]; [fb impactOccurred]; } @catch (NSException *e) {}
@@ -314,11 +310,8 @@ static void performAutoSkip() {
     }
 }
 
-// ✅ 学习捕获：仅在 LearnArmed 模式下拦截一次
 - (BOOL)sendAction:(SEL)action to:(id)target from:(id)sender forEvent:(UIEvent *)event {
     BOOL result = %orig;
-    
-    // 只有明确激活了学习捕获才拦截，观察模式和自动模式绝不干扰
     if (g_currentMode == AI_Mode_LearnArmed && [sender isKindOfClass:[UIButton class]]) {
         UIButton *btn = (UIButton *)sender;
         NSString *title = [btn titleForState:UIControlStateNormal];
@@ -326,9 +319,7 @@ static void performAutoSkip() {
             NSString *tc = NSStringFromClass([target class]);
             NSString *sn = NSStringFromSelector(action);
             saveSkipConfig(tc, sn);
-            
-            g_currentMode = AI_Mode_Observe; // ✅ 捕获一次后立即回到观察模式
-            
+            g_currentMode = AI_Mode_Observe;
             UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
             [fb impactOccurred];
             showTopLevelToast([NSString stringWithFormat:@"✅ 已捕获:\n%@.%@\n重启后自动生效", tc, sn]);
@@ -341,13 +332,11 @@ static void performAutoSkip() {
 // ========== 入口 ==========
 %ctor {
     NSDictionary *config = loadSkipConfig();
-    
     if (config && config[@"targetClass"] && config[@"selectorName"]) {
         g_currentMode = AI_Mode_AutoSkip;
         NSString *tc = config[@"targetClass"];
         NSString *sn = config[@"selectorName"];
         showTopLevelToast([NSString stringWithFormat:@"🚀 AdInspector v7.0\n【自动模式】\n%@.%@\n\n双指长按=学习\n三指长按=诊断\n三指双击=清除", tc, sn]);
-        
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             performAutoSkip();
         });
@@ -355,6 +344,5 @@ static void performAutoSkip() {
         g_currentMode = AI_Mode_Observe;
         showTopLevelToast(@"👁️ AdInspector v7.0\n【观察模式】不干预任何操作\n\n双指长按0.8s=激活学习\n三指长按0.8s=诊断视图\n三指双击=清除配置");
     }
-    
     NSLog(@"[AdInspector] ✅ v7.0 loaded. Mode: %ld", (long)g_currentMode);
 }

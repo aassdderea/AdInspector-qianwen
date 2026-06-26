@@ -32,14 +32,12 @@ static void saveSkipConfig(NSString *targetClass, NSString *selectorName, NSInte
         UIButton *btn = (UIButton *)sender;
         NSString *title = [btn titleForState:UIControlStateNormal];
         
-        // 通过标题关键词识别跳过按钮（兼容"跳过 4"/"跳过"/"Skip"等）
+        // 通过标题关键词识别跳过按钮
         if ([title containsString:@"跳过"] || [title containsString:@"Skip"]) {
             NSString *targetClassName = NSStringFromClass([target class]);
             NSString *selectorName = NSStringFromSelector(action);
             
-            // ✅ 修复：直接使用按钮所在 Window 的 tag
-            // 根据视图层级，跳过按钮是广告 Window 的子视图，btn.window 即为目标 Window
-            // 移除了 parentWindow 遍历，彻底解决低版本 SDK 编译报错问题
+            // 直接使用按钮所在 Window 的 tag
             NSInteger windowTag = btn.window.tag;
             
             saveSkipConfig(targetClassName, selectorName, windowTag);
@@ -83,12 +81,19 @@ static void saveSkipConfig(NSString *targetClass, NSString *selectorName, NSInte
             for (UIWindow *win in scene.windows) {
                 if (win.tag == windowTag) {
                     __block UIView *targetView = nil;
-                    void (^findSubview)(UIView *) = ^(UIView *v) {
-                        if ([v isKindOfClass:cls]) targetView = v;
-                        for (UIView *sub in v.subviews) findSubview(sub);
+                    
+                    // ✅ 修复：添加 __block 修饰符，解决递归 Block 自引用编译报错
+                    __block void (^findSubview)(UIView *) = ^(UIView *v) {
+                        if ([v isKindOfClass:cls]) {
+                            targetView = v;
+                            return; // 找到后立即返回，避免无效遍历
+                        }
+                        for (UIView *sub in v.subviews) {
+                            findSubview(sub);
+                            if (targetView) return; // 子树已找到，提前退出
+                        }
                     };
                     
-                    // 兼容 rootViewController.view 为空的情况
                     if (win.rootViewController.view) {
                         findSubview(win.rootViewController.view);
                     }
@@ -100,6 +105,9 @@ static void saveSkipConfig(NSString *targetClass, NSString *selectorName, NSInte
                         #pragma clang diagnostic pop
                         NSLog(@"[AdInspector] ✅ Auto-skip triggered!");
                     }
+                    
+                    // ✅ 修复：释放 Block 引用，防止循环引用导致内存泄漏
+                    findSubview = nil;
                     break;
                 }
             }

@@ -78,6 +78,16 @@ static void dumpViewHierarchy(UIView *view, int indent) {
     }
 }
 
+// ✅ C 函数定义放在 %ctor 和 %hook 之前，确保全局可见且无需额外声明
+static UIView* findTargetSubview(UIView *root, Class targetCls) {
+    if ([root isKindOfClass:targetCls]) return root;
+    for (UIView *sub in root.subviews) {
+        UIView *found = findTargetSubview(sub, targetCls);
+        if (found) return found;
+    }
+    return nil;
+}
+
 // ========== 学习态：全局拦截按钮点击 ==========
 %hook UIApplication
 - (BOOL)sendAction:(SEL)action to:(id)target from:(id)sender forEvent:(UIEvent *)event {
@@ -97,7 +107,6 @@ static void dumpViewHierarchy(UIView *view, int indent) {
             UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
             [feedback impactOccurred];
             
-            // ✅ 学习成功 Toast 反馈
             NSString *msg = [NSString stringWithFormat:@"✅ 已学习: %@\ntag:%ld", targetClassName, (long)windowTag];
             showToast(msg);
         }
@@ -155,9 +164,8 @@ static void dumpViewHierarchy(UIView *view, int indent) {
         for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
             for (UIWindow *win in scene.windows) {
                 if (win.tag == windowTag) {
-                    __block UIView *targetView = nil;
-                    // 使用 C 函数查找，避免 Block 递归编译问题
-                    extern UIView* findTargetSubview(UIView *, Class);
+                    // ✅ 直接调用，无需 extern 声明
+                    UIView *targetView = nil;
                     if (win.rootViewController.view) {
                         targetView = findTargetSubview(win.rootViewController.view, cls);
                     }
@@ -174,14 +182,4 @@ static void dumpViewHierarchy(UIView *view, int indent) {
             }
         }
     });
-}
-
-// ✅ C 函数定义放在 %ctor 外部，确保全局可见
-static UIView* findTargetSubview(UIView *root, Class targetCls) {
-    if ([root isKindOfClass:targetCls]) return root;
-    for (UIView *sub in root.subviews) {
-        UIView *found = findTargetSubview(sub, targetCls);
-        if (found) return found;
-    }
-    return nil;
 }

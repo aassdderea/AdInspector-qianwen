@@ -114,7 +114,7 @@ static BOOL clearSkipConfig() {
     }
 }
 
-// ========== 文本提取 ==========
+// ========== 文本提取（v7.16 增强关键词）==========
 static NSString* extractAllTextFromView(UIView *view) {
     NSMutableString *allText = [NSMutableString string];
     if ([view isKindOfClass:[UIButton class]]) {
@@ -150,7 +150,9 @@ static BOOL isSkipRelatedText(NSString *text) {
     NSString *lower = [text lowercaseString];
     return [lower containsString:@"跳过"] || [lower containsString:@"skip"] ||
            [lower containsString:@"close"] || [lower containsString:@"关闭"] ||
-           [lower containsString:@"dismiss"];
+           [lower containsString:@"dismiss"] || [lower containsString:@"✕"] ||
+           [lower containsString:@"×"] || [lower containsString:@"x"] ||
+           [lower containsString:@">"] || [lower containsString:@"广告"];
 }
 
 static NSArray<NSString *> *extractGestureActions(UIGestureRecognizer *gr) {
@@ -243,7 +245,7 @@ static UIView* findBestTargetSubview(UIView *root, Class targetCls) {
     __block NSInteger nodeCount = 0;
     void (^collect)(UIView *, NSInteger) = nil;
     collect = ^(UIView *v, NSInteger depth) {
-        if (depth > 30 || nodeCount > 500) return; // ✅ 防止无限递归/过大视图树
+        if (depth > 30 || nodeCount > 500) return;
         nodeCount++;
         if ([v isKindOfClass:targetCls] && !v.isHidden && v.alpha > 0.01 &&
             v.bounds.size.width > 1 && v.bounds.size.height > 1 && v.window != nil) {
@@ -334,55 +336,78 @@ static void performAutoSkip() {
     }
 }
 
-// ========== 学习通道 ==========
+// ========== 学习通道（v7.16 增强版）==========
 static void tryLearnFromTouchEndPoint(CGPoint point, UIWindow *window) {
     if (g_currentMode != AI_Mode_LearnArmed || !window) return;
+    
     UIView *hitView = [window hitTest:point withEvent:nil];
     if (!hitView) return;
+    
+    NSLog(@"[AdInspector] 🎯 Learn mode touch at: %@", NSStringFromClass([hitView class]));
+    
     UIView *current = hitView;
     NSInteger depth = 0;
-    while (current && depth < 8) {
-        NSString *text = extractAllTextRecursive(current, 10);
-        if (isSkipRelatedText(text)) {
-            NSString *selName = @"__adinspector_control_skip__";
-            if (![current isKindOfClass:[UIControl class]]) {
-                BOOL foundRealSel = NO;
-                for (UIGestureRecognizer *gr in current.gestureRecognizers) {
+    BOOL learned = NO;
+    
+    while (current && depth < 10 && !learned) {
+        NSString *text = extractAllTextRecursive(current, 15);
+        BOOL textMatched = isSkipRelatedText(text);
+        
+        // ✅ 增强：小尺寸+有手势=自动捕获（兜底纯图标按钮）
+        BOOL isSmallInteractiveView = (current.bounds.size.width <= 100 && 
+                                       current.bounds.size.height <= 100 && 
+                                       current.gestureRecognizers.count > 0);
+        
+        if (textMatched || isSmallInteractiveView) {
+            NSString *targetClass = NSStringFromClass([current class]);
+            NSString *selName = @"__adinspector_touch_skip__";
+            
+            for (UIGestureRecognizer *gr in current.gestureRecognizers) {
+                NSArray *gas = extractGestureActions(gr);
+                for (NSString *info in gas) {
+                    NSRange ar = [info rangeOfString:@" -> "];
+                    if (ar.location != NSNotFound) {
+                        selName = [info substringFromIndex:ar.location + 4];
+                        break;
+                    }
+                }
+                if (![selName isEqualToString:@"__adinspector_touch_skip__"]) break;
+            }
+            
+            if ([selName isEqualToString:@"__adinspector_touch_skip__"] && current.superview) {
+                for (UIGestureRecognizer *gr in current.superview.gestureRecognizers) {
                     NSArray *gas = extractGestureActions(gr);
                     for (NSString *info in gas) {
                         NSRange ar = [info rangeOfString:@" -> "];
                         if (ar.location != NSNotFound) {
                             selName = [info substringFromIndex:ar.location + 4];
-                            foundRealSel = YES;
                             break;
                         }
                     }
-                    if (foundRealSel) break;
-                }
-                if (!foundRealSel && current.superview) {
-                    for (UIGestureRecognizer *gr in current.superview.gestureRecognizers) {
-                        NSArray *gas = extractGestureActions(gr);
-                        for (NSString *info in gas) {
-                            NSRange ar = [info rangeOfString:@" -> "];
-                            if (ar.location != NSNotFound) {
-                                selName = [info substringFromIndex:ar.location + 4];
-                                foundRealSel = YES;
-                                break;
-                            }
-                        }
-                        if (foundRealSel) break;
-                    }
+                    if (![selName isEqualToString:@"__adinspector_touch_skip__"]) break;
                 }
             }
-            saveSkipConfig(NSStringFromClass([current class]), selName);
+            
+            saveSkipConfig(targetClass, selName);
             g_currentMode = AI_Mode_Observe;
+            
             UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
             [fb impactOccurred];
-            showTopLevelToast([NSString stringWithFormat:@"✅ 学习成功!\n%@.%@", NSStringFromClass([current class]), selName]);
+            
+            showTopLevelToast([NSString stringWithFormat:@"✅ 学习成功!\n%@.%@\n%@", 
+                              targetClass, selName, 
+                              textMatched ? @"(文本匹配)" : @"(小视图+手势兜底)"]);
+            learned = YES;
             return;
         }
+        
         current = current.superview;
         depth++;
+    }
+    
+    if (!learned) {
+        showTopLevelToast([NSString stringWithFormat:@"⚠️ 未识别为跳过按钮\n类名: %@\n请尝试点击按钮中心位置", 
+                          NSStringFromClass([hitView class])]);
     }
 }
 
@@ -553,12 +578,12 @@ static void startPolling() {
 }
 %end
 
-// ========== ✅ v7.15 入口（零同步操作，全延迟）==========
+// ========== ✅ v7.16 入口（零同步操作，全延迟）==========
 %ctor {
     // ✅ 不在 %ctor 中执行任何逻辑，仅注册一个延迟初始化块
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
-            NSLog(@"[AdInspector] ✅ v7.15 deferred init starting...");
+            NSLog(@"[AdInspector] ✅ v7.16 deferred init starting...");
             
             startPolling();
             
@@ -574,9 +599,8 @@ static void startPolling() {
                 }
                 
                 NSLog(@"[AdInspector] Auto-skip mode: %@.%@", tc, sn);
-                showTopLevelToast([NSString stringWithFormat:@"🚀 AdInspector v7.15\n自动模式: %@.%@", tc, sn]);
+                showTopLevelToast([NSString stringWithFormat:@"🚀 AdInspector v7.16\n自动模式: %@.%@", tc, sn]);
                 
-                // ✅ 再延迟 2 秒执行跳过，确保广告 SDK 完全就绪
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     @try {
                         performAutoSkip();
@@ -587,14 +611,14 @@ static void startPolling() {
             } else {
                 g_currentMode = AI_Mode_Observe;
                 NSLog(@"[AdInspector] Observe mode, no config");
-                showTopLevelToast(@"👁️ AdInspector v7.15\n观察模式\n\n双指长按=学习\n三指长按=诊断\n三指双击=清除");
+                showTopLevelToast(@"👁️ AdInspector v7.16\n观察模式\n\n双指长按=学习\n三指长按=诊断\n三指双击=清除");
             }
-            NSLog(@"[AdInspector] ✅ v7.15 deferred init complete. Mode: %ld", (long)g_currentMode);
+            NSLog(@"[AdInspector] ✅ v7.16 deferred init complete. Mode: %ld", (long)g_currentMode);
         } @catch (NSException *e) {
-            NSLog(@"[AdInspector] ❌ v7.15 deferred init FATAL: %@", e.reason);
+            NSLog(@"[AdInspector] ❌ v7.16 deferred init FATAL: %@", e.reason);
         }
     });
     
-    // ✅ %ctor 立即返回，不阻塞 App 启动
+    // ✅ %ctor 立即返回，不阻塞 App 启动（注意 %% 转义避免编译错误）
     NSLog(@"[AdInspector] %%ctor registered (deferred 3s)");
 }

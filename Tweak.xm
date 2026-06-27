@@ -2,7 +2,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 
-// ========== ✅ 顶层 Toast ==========
+// ========== 顶层 Toast ==========
 static UIWindow *g_toastWindow = nil;
 static UILabel *g_toastLabel = nil;
 static dispatch_block_t g_hideBlock = nil;
@@ -44,56 +44,74 @@ static void showTopLevelToast(NSString *message) {
     });
 }
 
-// ========== 配置管理 ==========
+// ========== 配置管理（全安全包裹）==========
 static NSString* getConfigPath() {
-    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *docDir = paths.firstObject;
-    if (docDir) return [docDir stringByAppendingPathComponent:@"AdInspector_SkipConfig.json"];
-    NSArray *cachePaths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
-    NSString *cacheDir = cachePaths.firstObject;
-    if (cacheDir) return [cacheDir stringByAppendingPathComponent:@"AdInspector_SkipConfig.json"];
-    return [NSTemporaryDirectory() stringByAppendingPathComponent:@"AdInspector_SkipConfig.json"];
+    @try {
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *docDir = paths.firstObject;
+        if (docDir) return [docDir stringByAppendingPathComponent:@"AdInspector_SkipConfig.json"];
+        NSArray *cachePaths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
+        NSString *cacheDir = cachePaths.firstObject;
+        if (cacheDir) return [cacheDir stringByAppendingPathComponent:@"AdInspector_SkipConfig.json"];
+        return [NSTemporaryDirectory() stringByAppendingPathComponent:@"AdInspector_SkipConfig.json"];
+    } @catch (NSException *e) {
+        return [NSTemporaryDirectory() stringByAppendingPathComponent:@"AdInspector_SkipConfig.json"];
+    }
 }
 
 static NSDictionary* loadSkipConfig() {
-    NSData *data = [NSData dataWithContentsOfFile:getConfigPath()];
-    if (!data) return nil;
-    return [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    @try {
+        NSString *path = getConfigPath();
+        NSData *data = [NSData dataWithContentsOfFile:path];
+        if (!data) return nil;
+        return [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    } @catch (NSException *e) {
+        NSLog(@"[AdInspector] ⚠️ loadSkipConfig exception: %@", e.reason);
+        return nil;
+    }
 }
 
 static void saveSkipConfig(NSString *targetClass, NSString *selectorName) {
-    NSString *path = getConfigPath();
-    NSString *dir = [path stringByDeletingLastPathComponent];
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:dir]) {
-        NSError *err = nil;
-        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&err];
-        if (err) return;
-    }
-    NSDictionary *config = @{
-        @"targetClass": targetClass ?: @"",
-        @"selectorName": selectorName ?: @"",
-        @"learnedAt": @([[NSDate date] timeIntervalSince1970])
-    };
-    NSError *jsonErr = nil;
-    NSData *data = [NSJSONSerialization dataWithJSONObject:config options:NSJSONWritingPrettyPrinted error:&jsonErr];
-    if (!data) return;
-    NSError *writeErr = nil;
-    BOOL ok = [data writeToFile:path options:NSDataWritingAtomic error:&writeErr];
-    if (ok) {
-        showTopLevelToast([NSString stringWithFormat:@"✅ 配置已保存!\n%@", path]);
-    } else {
-        showTopLevelToast([NSString stringWithFormat:@"❌ 保存失败: %@", writeErr.localizedDescription]);
+    @try {
+        NSString *path = getConfigPath();
+        NSString *dir = [path stringByDeletingLastPathComponent];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:dir]) {
+            NSError *err = nil;
+            [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&err];
+            if (err) return;
+        }
+        NSDictionary *config = @{
+            @"targetClass": targetClass ?: @"",
+            @"selectorName": selectorName ?: @"",
+            @"learnedAt": @([[NSDate date] timeIntervalSince1970])
+        };
+        NSError *jsonErr = nil;
+        NSData *data = [NSJSONSerialization dataWithJSONObject:config options:NSJSONWritingPrettyPrinted error:&jsonErr];
+        if (!data) return;
+        NSError *writeErr = nil;
+        BOOL ok = [data writeToFile:path options:NSDataWritingAtomic error:&writeErr];
+        if (ok) {
+            showTopLevelToast([NSString stringWithFormat:@"✅ 配置已保存!\n%@", path]);
+        } else {
+            showTopLevelToast([NSString stringWithFormat:@"❌ 保存失败: %@", writeErr.localizedDescription]);
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[AdInspector] ⚠️ saveSkipConfig exception: %@", e.reason);
     }
 }
 
 static BOOL clearSkipConfig() {
-    NSString *path = getConfigPath();
-    if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
-        NSError *error = nil;
-        return [[NSFileManager defaultManager] removeItemAtPath:path error:&error];
+    @try {
+        NSString *path = getConfigPath();
+        if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+            NSError *error = nil;
+            return [[NSFileManager defaultManager] removeItemAtPath:path error:&error];
+        }
+        return NO;
+    } @catch (NSException *e) {
+        return NO;
     }
-    return NO;
 }
 
 // ========== 文本提取 ==========
@@ -115,12 +133,13 @@ static NSString* extractAllTextFromView(UIView *view) {
     return allText;
 }
 
-static NSString* extractAllTextRecursive(UIView *view) {
+static NSString* extractAllTextRecursive(UIView *view, NSInteger maxDepth) {
+    if (maxDepth <= 0 || !view) return @"";
     NSMutableString *result = [NSMutableString string];
     NSString *selfText = extractAllTextFromView(view);
     if (selfText.length > 0) [result appendString:selfText];
     for (UIView *sub in view.subviews) {
-        NSString *subText = extractAllTextRecursive(sub);
+        NSString *subText = extractAllTextRecursive(sub, maxDepth - 1);
         if (subText.length > 0) [result appendString:subText];
     }
     return result;
@@ -153,47 +172,53 @@ static NSArray<NSString *> *extractGestureActions(UIGestureRecognizer *gr) {
 
 // ========== 三指诊断 ==========
 static void inspectViewAtPoint(CGPoint point) {
-    UIWindow *keyWindow = nil;
-    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if (scene.activationState == UISceneActivationStateForegroundActive) {
-            for (UIWindow *window in scene.windows) {
-                if (window.isKeyWindow) { keyWindow = window; break; }
+    @try {
+        UIWindow *keyWindow = nil;
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                for (UIWindow *window in scene.windows) {
+                    if (window.isKeyWindow) { keyWindow = window; break; }
+                }
             }
         }
-    }
-    UIView *hitView = [keyWindow hitTest:point withEvent:nil];
-    if (!hitView) { showTopLevelToast(@"❌ 未命中视图"); return; }
+        UIView *hitView = [keyWindow hitTest:point withEvent:nil];
+        if (!hitView) { showTopLevelToast(@"❌ 未命中视图"); return; }
 
-    NSMutableArray *chain = [NSMutableArray array];
-    UIView *current = hitView;
-    while (current) {
-        [chain addObject:[NSString stringWithFormat:@"%@ (%@)", NSStringFromClass([current class]), current.accessibilityIdentifier ?: @"nil"]];
-        current = current.superview;
-    }
-    NSMutableArray *actions = [NSMutableArray array];
-    if ([hitView isKindOfClass:[UIControl class]]) {
-        UIControl *control = (UIControl *)hitView;
-        for (id target in control.allTargets) {
-            NSArray *ta = [control actionsForTarget:target forControlEvent:UIControlEventAllEvents];
-            for (NSString *a in ta) [actions addObject:[NSString stringWithFormat:@"%@ -> %@", target, a]];
+        NSMutableArray *chain = [NSMutableArray array];
+        UIView *current = hitView;
+        NSInteger depth = 0;
+        while (current && depth < 20) {
+            [chain addObject:[NSString stringWithFormat:@"%@ (%@)", NSStringFromClass([current class]), current.accessibilityIdentifier ?: @"nil"]];
+            current = current.superview;
+            depth++;
         }
-    }
-    for (UIGestureRecognizer *gr in hitView.gestureRecognizers) [actions addObjectsFromArray:extractGestureActions(gr)];
+        NSMutableArray *actions = [NSMutableArray array];
+        if ([hitView isKindOfClass:[UIControl class]]) {
+            UIControl *control = (UIControl *)hitView;
+            for (id target in control.allTargets) {
+                NSArray *ta = [control actionsForTarget:target forControlEvent:UIControlEventAllEvents];
+                for (NSString *a in ta) [actions addObject:[NSString stringWithFormat:@"%@ -> %@", target, a]];
+            }
+        }
+        for (UIGestureRecognizer *gr in hitView.gestureRecognizers) [actions addObjectsFromArray:extractGestureActions(gr)];
 
-    NSMutableDictionary *result = [NSMutableDictionary dictionary];
-    result[@"chain"] = chain;
-    result[@"actions"] = actions;
-    result[@"info"] = @{
-        @"frame": NSStringFromCGRect(hitView.frame),
-        @"hidden": @(hitView.isHidden), @"alpha": @(hitView.alpha)
-    };
+        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        result[@"chain"] = chain;
+        result[@"actions"] = actions;
+        result[@"info"] = @{
+            @"frame": NSStringFromCGRect(hitView.frame),
+            @"hidden": @(hitView.isHidden), @"alpha": @(hitView.alpha)
+        };
 
-    NSError *error = nil;
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted error:&error];
-    if (jsonData) {
-        NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"ad_inspect_result.json"];
-        BOOL ok = [[[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error];
-        showTopLevelToast(ok ? [NSString stringWithFormat:@"✅ 诊断成功\n%@", path] : @"⚠️ 写入失败");
+        NSError *error = nil;
+        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted error:&error];
+        if (jsonData) {
+            NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"ad_inspect_result.json"];
+            BOOL ok = [[[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error];
+            showTopLevelToast(ok ? [NSString stringWithFormat:@"✅ 诊断成功\n%@", path] : @"⚠️ 写入失败");
+        }
+    } @catch (NSException *e) {
+        showTopLevelToast([NSString stringWithFormat:@"❌ 诊断异常: %@", e.reason]);
     }
 }
 
@@ -211,23 +236,25 @@ static NSTimeInterval g_threeFingerStartTime = 0;
 static BOOL g_threeFingerArmed = NO;
 static CGPoint g_trackedPoint = CGPointZero;
 
-// ========== ✅ v7.14 安全查找（增加 UIControl 优先匹配）==========
+// ========== 安全查找（带深度限制）==========
 static UIView* findBestTargetSubview(UIView *root, Class targetCls) {
     if (!root) return nil;
     NSMutableArray<UIView *> *candidates = [NSMutableArray array];
-    void (^collect)(UIView *) = nil;
-    collect = ^(UIView *v) {
+    __block NSInteger nodeCount = 0;
+    void (^collect)(UIView *, NSInteger) = nil;
+    collect = ^(UIView *v, NSInteger depth) {
+        if (depth > 30 || nodeCount > 500) return; // ✅ 防止无限递归/过大视图树
+        nodeCount++;
         if ([v isKindOfClass:targetCls] && !v.isHidden && v.alpha > 0.01 &&
             v.bounds.size.width > 1 && v.bounds.size.height > 1 && v.window != nil) {
             [candidates addObject:v];
         }
-        for (UIView *sub in v.subviews) collect(sub);
+        for (UIView *sub in v.subviews) collect(sub, depth + 1);
     };
-    collect(root);
+    collect(root, 0);
     if (candidates.count == 0) return nil;
     if (candidates.count == 1) return candidates.firstObject;
 
-    // ✅ 优先选择 UIControl 子类（按钮可直接 sendActions）
     UIView *bestControl = nil;
     for (UIView *c in candidates) {
         if ([c isKindOfClass:[UIControl class]]) { bestControl = c; break; }
@@ -238,7 +265,7 @@ static UIView* findBestTargetSubview(UIView *root, Class targetCls) {
     CGFloat bestArea = CGFLOAT_MAX;
     BOOL bestHasSkipText = NO;
     for (UIView *c in candidates) {
-        NSString *text = extractAllTextRecursive(c);
+        NSString *text = extractAllTextRecursive(c, 10);
         BOOL hasSkip = isSkipRelatedText(text);
         CGFloat area = c.bounds.size.width * c.bounds.size.height;
         if (!best) { best = c; bestArea = area; bestHasSkipText = hasSkip; }
@@ -248,57 +275,63 @@ static UIView* findBestTargetSubview(UIView *root, Class targetCls) {
     return best;
 }
 
-// ========== ✅ v7.14 安全自动跳过（无 Touch 模拟）==========
+// ========== 安全自动跳过 ==========
 static void performAutoSkip() {
-    NSDictionary *config = loadSkipConfig();
-    if (!config) return;
-    NSString *tc = config[@"targetClass"];
-    NSString *sn = config[@"selectorName"];
-    if (!tc.length || !sn.length) return;
-    Class cls = NSClassFromString(tc);
-    SEL sel = NSSelectorFromString(sn);
-    if (!cls) return;
+    @try {
+        NSDictionary *config = loadSkipConfig();
+        if (!config) { NSLog(@"[AdInspector] No config found"); return; }
+        NSString *tc = config[@"targetClass"];
+        NSString *sn = config[@"selectorName"];
+        if (!tc.length || !sn.length) { NSLog(@"[AdInspector] Empty config"); return; }
+        Class cls = NSClassFromString(tc);
+        SEL sel = NSSelectorFromString(sn);
+        if (!cls) { NSLog(@"[AdInspector] Class not found: %@", tc); return; }
 
-    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        for (UIWindow *win in scene.windows) {
-            if (!win.rootViewController.view) continue;
-            UIView *tv = findBestTargetSubview(win.rootViewController.view, cls);
-            if (!tv) continue;
+        NSLog(@"[AdInspector] Attempting auto-skip: %@.%@", tc, sn);
 
-            @try {
-                // ✅ 优先使用 UIControl 官方 API
-                if ([tv isKindOfClass:[UIControl class]]) {
-                    [(UIControl *)tv sendActionsForControlEvents:UIControlEventTouchUpInside];
-                    showTopLevelToast([NSString stringWithFormat:@"🚀 自动跳过(Control)!\n%@.%@", tc, sn]);
-                    return;
-                }
-                // ✅ 回退到 performSelector
-                if ([tv respondsToSelector:sel]) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    [tv performSelector:sel withObject:nil];
-                    #pragma clang diagnostic pop
-                    showTopLevelToast([NSString stringWithFormat:@"🚀 自动跳过!\n%@.%@", tc, sn]);
-                    return;
-                }
-                // ✅ 最后尝试向上查找 UIControl 父级
-                UIView *parent = tv.superview;
-                NSInteger depth = 0;
-                while (parent && depth < 5) {
-                    if ([parent isKindOfClass:[UIControl class]]) {
-                        [(UIControl *)parent sendActionsForControlEvents:UIControlEventTouchUpInside];
-                        showTopLevelToast([NSString stringWithFormat:@"🚀 父级Control触发!\n%@", NSStringFromClass([parent class])]);
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            for (UIWindow *win in scene.windows) {
+                if (!win.rootViewController.view) continue;
+                UIView *tv = findBestTargetSubview(win.rootViewController.view, cls);
+                if (!tv) continue;
+
+                NSLog(@"[AdInspector] Found target: %@ in %@", NSStringFromClass([tv class]), win);
+
+                @try {
+                    if ([tv isKindOfClass:[UIControl class]]) {
+                        [(UIControl *)tv sendActionsForControlEvents:UIControlEventTouchUpInside];
+                        showTopLevelToast([NSString stringWithFormat:@"🚀 自动跳过(Control)!\n%@.%@", tc, sn]);
                         return;
                     }
-                    parent = parent.superview;
-                    depth++;
+                    if ([tv respondsToSelector:sel]) {
+                        #pragma clang diagnostic push
+                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                        [tv performSelector:sel withObject:nil];
+                        #pragma clang diagnostic pop
+                        showTopLevelToast([NSString stringWithFormat:@"🚀 自动跳过!\n%@.%@", tc, sn]);
+                        return;
+                    }
+                    UIView *parent = tv.superview;
+                    NSInteger depth = 0;
+                    while (parent && depth < 5) {
+                        if ([parent isKindOfClass:[UIControl class]]) {
+                            [(UIControl *)parent sendActionsForControlEvents:UIControlEventTouchUpInside];
+                            showTopLevelToast([NSString stringWithFormat:@"🚀 父级Control触发!\n%@", NSStringFromClass([parent class])]);
+                            return;
+                        }
+                        parent = parent.superview;
+                        depth++;
+                    }
+                } @catch (NSException *e) {
+                    NSLog(@"[AdInspector] Auto-skip exception: %@", e.reason);
                 }
-            } @catch (NSException *e) {
-                NSLog(@"[AdInspector] Auto-skip exception: %@", e.reason);
             }
         }
+        NSLog(@"[AdInspector] No actionable target found");
+        showTopLevelToast(@"ℹ️ 未找到可触发的目标");
+    } @catch (NSException *e) {
+        NSLog(@"[AdInspector] ⚠️ performAutoSkip fatal exception: %@", e.reason);
     }
-    showTopLevelToast(@"ℹ️ 未找到可触发的目标");
 }
 
 // ========== 学习通道 ==========
@@ -309,13 +342,10 @@ static void tryLearnFromTouchEndPoint(CGPoint point, UIWindow *window) {
     UIView *current = hitView;
     NSInteger depth = 0;
     while (current && depth < 8) {
-        NSString *text = extractAllTextRecursive(current);
+        NSString *text = extractAllTextRecursive(current, 10);
         if (isSkipRelatedText(text)) {
-            // ✅ v7.14: 不再保存 __adinspector_touch_skip__，统一保存实际 selector
-            // 如果当前视图是 UIControl，保存 sendActions 标记
             NSString *selName = @"__adinspector_control_skip__";
             if (![current isKindOfClass:[UIControl class]]) {
-                // 非 Control 类型，尝试从手势中提取真实 selector
                 BOOL foundRealSel = NO;
                 for (UIGestureRecognizer *gr in current.gestureRecognizers) {
                     NSArray *gas = extractGestureActions(gr);
@@ -478,7 +508,7 @@ static void startPolling() {
     %orig;
     if (g_currentMode == AI_Mode_LearnArmed && [cv isKindOfClass:[UICollectionView class]]) {
         for (UICollectionViewCell *cell in cv.visibleCells) {
-            if (isSkipRelatedText(extractAllTextRecursive(cell))) {
+            if (isSkipRelatedText(extractAllTextRecursive(cell, 10))) {
                 saveSkipConfig(NSStringFromClass([self class]), NSStringFromSelector(_cmd));
                 g_currentMode = AI_Mode_Observe;
                 UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
@@ -505,8 +535,8 @@ static void startPolling() {
                         id tgt = [ti valueForKey:@"_target"];
                         SEL sel = NSSelectorFromString(sp);
                         if (tgt && [tgt respondsToSelector:sel]) {
-                            NSString *vt = extractAllTextRecursive(self.view);
-                            if (!isSkipRelatedText(vt) && self.view.superview) vt = extractAllTextRecursive(self.view.superview);
+                            NSString *vt = extractAllTextRecursive(self.view, 10);
+                            if (!isSkipRelatedText(vt) && self.view.superview) vt = extractAllTextRecursive(self.view.superview, 10);
                             if (isSkipRelatedText(vt)) {
                                 saveSkipConfig(NSStringFromClass([tgt class]), NSStringFromSelector(sel));
                                 g_currentMode = AI_Mode_Observe;
@@ -523,29 +553,48 @@ static void startPolling() {
 }
 %end
 
-// ========== ✅ v7.14 入口 ==========
+// ========== ✅ v7.15 入口（零同步操作，全延迟）==========
 %ctor {
-    startPolling();
-
-    NSDictionary *config = loadSkipConfig();
-    if (config && config[@"targetClass"] && config[@"selectorName"]) {
-        NSString *tc = config[@"targetClass"];
-        NSString *sn = config[@"selectorName"];
-        g_currentMode = AI_Mode_AutoSkip;
-
-        // ✅ v7.14: 兼容旧版 touch_skip 配置，自动迁移为 control_skip
-        if ([sn isEqualToString:@"__adinspector_touch_skip__"]) {
-            sn = @"__adinspector_control_skip__";
-            saveSkipConfig(tc, sn);
+    // ✅ 不在 %ctor 中执行任何逻辑，仅注册一个延迟初始化块
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @try {
+            NSLog(@"[AdInspector] ✅ v7.15 deferred init starting...");
+            
+            startPolling();
+            
+            NSDictionary *config = loadSkipConfig();
+            if (config && config[@"targetClass"] && config[@"selectorName"]) {
+                NSString *tc = config[@"targetClass"];
+                NSString *sn = config[@"selectorName"];
+                g_currentMode = AI_Mode_AutoSkip;
+                
+                if ([sn isEqualToString:@"__adinspector_touch_skip__"]) {
+                    sn = @"__adinspector_control_skip__";
+                    saveSkipConfig(tc, sn);
+                }
+                
+                NSLog(@"[AdInspector] Auto-skip mode: %@.%@", tc, sn);
+                showTopLevelToast([NSString stringWithFormat:@"🚀 AdInspector v7.15\n自动模式: %@.%@", tc, sn]);
+                
+                // ✅ 再延迟 2 秒执行跳过，确保广告 SDK 完全就绪
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    @try {
+                        performAutoSkip();
+                    } @catch (NSException *e) {
+                        NSLog(@"[AdInspector] ⚠️ Deferred auto-skip exception: %@", e.reason);
+                    }
+                });
+            } else {
+                g_currentMode = AI_Mode_Observe;
+                NSLog(@"[AdInspector] Observe mode, no config");
+                showTopLevelToast(@"👁️ AdInspector v7.15\n观察模式\n\n双指长按=学习\n三指长按=诊断\n三指双击=清除");
+            }
+            NSLog(@"[AdInspector] ✅ v7.15 deferred init complete. Mode: %ld", (long)g_currentMode);
+        } @catch (NSException *e) {
+            NSLog(@"[AdInspector] ❌ v7.15 deferred init FATAL: %@", e.reason);
         }
-
-        showTopLevelToast([NSString stringWithFormat:@"🚀 AdInspector v7.14\n自动模式: %@.%@", tc, sn]);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            performAutoSkip();
-        });
-    } else {
-        g_currentMode = AI_Mode_Observe;
-        showTopLevelToast(@"👁️ AdInspector v7.14\n观察模式\n\n双指长按=学习\n三指长按=诊断\n三指双击=清除");
-    }
-    NSLog(@"[AdInspector] ✅ v7.14 loaded. Mode: %ld", (long)g_currentMode);
+    });
+    
+    // ✅ %ctor 立即返回，不阻塞 App 启动
+    NSLog(@"[AdInspector] %ctor registered (deferred 3s)");
 }

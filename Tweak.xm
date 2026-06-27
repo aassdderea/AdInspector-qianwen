@@ -596,5 +596,5 @@ static void startPolling() {
     });
     
     // ✅ %ctor 立即返回，不阻塞 App 启动
-    NNSLog(@"[AdInspector] %%ctor registered (deferred 3s)");
+    NSLog(@"[AdInspector] %%ctor registered (deferred 3s)");
 }

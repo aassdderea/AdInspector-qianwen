@@ -1,9 +1,31 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <QuartzCore/QuartzCore.h>
 
-// ========== ✅ 全局重入保护 ==========
+// ========== ✅ 全局重入保护 + 安全重置 ==========
 static BOOL g_isSimulatingTouch = NO;
+static NSTimeInterval g_simulateStartTime = 0;
+
+static void safeSetSimulating(BOOL value) {
+    g_isSimulatingTouch = value;
+    if (value) {
+        g_simulateStartTime = [[NSDate date] timeIntervalSinceReferenceDate];
+    } else {
+        g_simulateStartTime = 0;
+    }
+}
+
+// 每帧检查：如果模拟状态超过 2 秒未释放，强制重置（防止死锁）
+static void checkSimulateTimeout() {
+    if (g_isSimulatingTouch && g_simulateStartTime > 0) {
+        NSTimeInterval elapsed = [[NSDate date] timeIntervalSinceReferenceDate] - g_simulateStartTime;
+        if (elapsed > 2.0) {
+            NSLog(@"[AdInspector] ⚠️ Simulate lock timeout (%.1fs), force reset", elapsed);
+            safeSetSimulating(NO);
+        }
+    }
+}
 
 // ========== ✅ 绝对安全的顶层 Toast ==========
 static UIWindow *g_toastWindow = nil;
@@ -217,14 +239,14 @@ typedef NS_ENUM(NSInteger, AI_Mode) {
 
 static AI_Mode g_currentMode = AI_Mode_Observe;
 
-// ✅ v7.11 手势状态改为独立变量，不再依赖 sendEvent 中的瞬时判断
+// ✅ v7.12 手势状态
 static NSTimeInterval g_twoFingerStartTime = 0;
 static BOOL g_twoFingerArmed = NO;
 static NSTimeInterval g_threeFingerStartTime = 0;
 static BOOL g_threeFingerArmed = NO;
 static CGPoint g_trackedPoint = CGPointZero;
 
-// ✅ v7.11 安全查找
+// ✅ v7.12 安全查找
 static UIView* findBestTargetSubview(UIView *root, Class targetCls) {
     if (!root) return nil;
     NSMutableArray<UIView *> *candidates = [NSMutableArray array];
@@ -288,7 +310,7 @@ static void performAutoSkip() {
     }
 }
 
-// ✅ v7.11 Touch 模拟：改用 UIWindow sendEvent 绕过 Hook 递归
+// ✅ v7.12 Touch 模拟
 static void performTouchAutoSkip(NSString *targetClassName) {
     Class cls = NSClassFromString(targetClassName);
     if (!cls) {
@@ -309,22 +331,20 @@ static void performTouchAutoSkip(NSString *targetClassName) {
                   NSStringFromClass([tv class]), NSStringFromCGRect(tv.frame), NSStringFromCGPoint(center));
             
             @try {
-                // ✅ 关键修复：设置重入锁
-                g_isSimulatingTouch = YES;
+                safeSetSimulating(YES);
                 
                 UITouch *touch = [[UITouch alloc] init];
-                @try { [touch setValue:tv.window forKey:@"_window"]; } @catch (NSException *e) { g_isSimulatingTouch = NO; continue; }
-                @try { [touch setValue:tv forKey:@"_view"]; } @catch (NSException *e) { g_isSimulatingTouch = NO; continue; }
+                @try { [touch setValue:tv.window forKey:@"_window"]; } @catch (NSException *e) { safeSetSimulating(NO); continue; }
+                @try { [touch setValue:tv forKey:@"_view"]; } @catch (NSException *e) { safeSetSimulating(NO); continue; }
                 @try { [touch setValue:tv forKey:@"_senderView"]; } @catch (NSException *e) {}
                 @try { [touch setValue:@(0) forKey:@"_touchType"]; } @catch (NSException *e) {}
                 @try { [touch setValue:@(YES) forKey:@"_isFirstTouchForView"]; } @catch (NSException *e) {}
                 @try { [touch setValue:@(1) forKey:@"_tapCount"]; } @catch (NSException *e) {}
                 
                 NSValue *locValue = [NSValue valueWithCGPoint:center];
-                @try { [touch setValue:locValue forKey:@"_locationInWindow"]; } @catch (NSException *e) { g_isSimulatingTouch = NO; continue; }
+                @try { [touch setValue:locValue forKey:@"_locationInWindow"]; } @catch (NSException *e) { safeSetSimulating(NO); continue; }
                 @try { [touch setValue:locValue forKey:@"_previousLocationInWindow"]; } @catch (NSException *e) {}
 
-                // Phase 1: Began — ✅ 发送到 window 而非 app
                 [touch setValue:@([[NSDate date] timeIntervalSinceReferenceDate]) forKey:@"_timestamp"];
                 [touch setValue:@(UITouchPhaseBegan) forKey:@"_phase"];
                 UIEvent *beganEvent = [[UIEvent alloc] init];
@@ -332,7 +352,6 @@ static void performTouchAutoSkip(NSString *targetClassName) {
                 [beganEvent setValue:@(UIEventTypeTouches) forKey:@"_type"];
                 [tv.window sendEvent:beganEvent];
 
-                // Phase 2: Stationary (30ms)
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     @try {
                         [touch setValue:@([[NSDate date] timeIntervalSinceReferenceDate]) forKey:@"_timestamp"];
@@ -343,7 +362,6 @@ static void performTouchAutoSkip(NSString *targetClassName) {
                         [tv.window sendEvent:stationaryEvent];
                     } @catch (NSException *e) {}
                     
-                    // Phase 3: Ended (再30ms)
                     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                         @try {
                             [touch setValue:@([[NSDate date] timeIntervalSinceReferenceDate]) forKey:@"_timestamp"];
@@ -358,14 +376,13 @@ static void performTouchAutoSkip(NSString *targetClassName) {
                         } @catch (NSException *e) {
                             showTopLevelToast([NSString stringWithFormat:@"❌ Ended阶段异常:\n%@", e.reason]);
                         }
-                        // ✅ 释放重入锁
-                        g_isSimulatingTouch = NO;
+                        safeSetSimulating(NO);
                     });
                 });
 
                 triggered = YES;
             } @catch (NSException *e) {
-                g_isSimulatingTouch = NO;
+                safeSetSimulating(NO);
                 NSLog(@"[AdInspector] Touch skip outer exception: %@", e.reason);
             }
             break;
@@ -461,61 +478,172 @@ static BOOL tryLearnFromSender(id sender, id target, SEL action) {
     return NO;
 }
 
-// ========== ✅ v7.11 手势轮询器（独立于 sendEvent）==========
-static void startGesturePolling() {
+// ========== ✅ v7.12 自定义手势识别器（绕过系统拦截）==========
+@interface AITwoFingerLongPressRecognizer : UIGestureRecognizer
+@end
+
+@implementation AITwoFingerLongPressRecognizer
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesBegan:touches withEvent:event];
+    if (self.numberOfTouches == 2 && g_twoFingerStartTime == 0) {
+        g_twoFingerStartTime = [[NSDate date] timeIntervalSinceReferenceDate];
+        g_twoFingerArmed = NO;
+        showTopLevelToast(@"⏳ 双指按住中...\n保持0.8s激活学习");
+    }
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesMoved:touches withEvent:event];
+    // 手指移动超过阈值则取消
+    if (self.numberOfTouches != 2 && g_twoFingerStartTime > 0 && !g_twoFingerArmed) {
+        g_twoFingerStartTime = 0;
+    }
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesEnded:touches withEvent:event];
+    if (g_twoFingerStartTime > 0 && !g_twoFingerArmed) {
+        g_twoFingerStartTime = 0;
+    }
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesCancelled:touches withEvent:event];
+    if (g_twoFingerStartTime > 0 && !g_twoFingerArmed) {
+        g_twoFingerStartTime = 0;
+    }
+}
+@end
+
+@interface AIThreeFingerLongPressRecognizer : UIGestureRecognizer
+@end
+
+@implementation AIThreeFingerLongPressRecognizer
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesBegan:touches withEvent:event];
+    if (self.numberOfTouches == 3 && g_threeFingerStartTime == 0) {
+        g_threeFingerStartTime = [[NSDate date] timeIntervalSinceReferenceDate];
+        g_threeFingerArmed = NO;
+        
+        // 计算中心点
+        CGPoint centerPoint = CGPointZero;
+        NSInteger validCount = 0;
+        for (UITouch *touch in touches) {
+            CGPoint p = [touch locationInView:touch.window];
+            centerPoint.x += p.x; centerPoint.y += p.y; validCount++;
+        }
+        if (validCount > 0) { centerPoint.x /= validCount; centerPoint.y /= validCount; }
+        g_trackedPoint = centerPoint;
+        
+        showTopLevelToast(@"⏳ 三指按住中...\n保持0.8s诊断视图");
+    }
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesMoved:touches withEvent:event];
+    if (self.numberOfTouches == 3 && g_threeFingerStartTime > 0) {
+        CGPoint centerPoint = CGPointZero;
+        NSInteger validCount = 0;
+        for (UITouch *touch in touches) {
+            CGPoint p = [touch locationInView:touch.window];
+            centerPoint.x += p.x; centerPoint.y += p.y; validCount++;
+        }
+        if (validCount > 0) { centerPoint.x /= validCount; centerPoint.y /= validCount; }
+        g_trackedPoint = centerPoint;
+    }
+    if (self.numberOfTouches != 3 && g_threeFingerStartTime > 0 && !g_threeFingerArmed) {
+        g_threeFingerStartTime = 0;
+    }
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesEnded:touches withEvent:event];
+    
+    // 三指双击检测
+    UITouch *anyTouch = touches.anyObject;
+    if (self.numberOfTouches <= 3 && anyTouch.tapCount >= 2 && g_threeFingerStartTime > 0) {
+        g_twoFingerStartTime = 0; g_twoFingerArmed = NO;
+        g_threeFingerStartTime = 0; g_threeFingerArmed = NO;
+        BOOL ok = clearSkipConfig();
+        g_currentMode = AI_Mode_Observe;
+        showTopLevelToast(ok ? @"🗑️ 配置已清除\n已切回观察模式" : @"ℹ️ 无配置文件可清除");
+        UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
+        [fb impactOccurred];
+    }
+    
+    if (g_threeFingerStartTime > 0 && !g_threeFingerArmed) {
+        g_threeFingerStartTime = 0;
+    }
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesCancelled:touches withEvent:event];
+    if (g_threeFingerStartTime > 0 && !g_threeFingerArmed) {
+        g_threeFingerStartTime = 0;
+    }
+}
+@end
+
+// ========== ✅ v7.12 CADisplayLink 轮询器（绑定主线程RunLoop，100%启动）==========
+static CADisplayLink *g_displayLink = nil;
+
+static void displayLinkCallback(CADisplayLink *link) {
+    @autoreleasepool {
+        checkSimulateTimeout();
+        
+        // 双指长按计时
+        if (g_twoFingerStartTime > 0 && !g_twoFingerArmed) {
+            NSTimeInterval elapsed = [[NSDate date] timeIntervalSinceReferenceDate] - g_twoFingerStartTime;
+            if (elapsed >= 0.8) {
+                g_twoFingerArmed = YES;
+                g_currentMode = AI_Mode_LearnArmed;
+                showTopLevelToast(@"🎯 学习捕获已激活!\n请点击广告【跳过】按钮");
+                UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+                [fb impactOccurred];
+            }
+        }
+        
+        // 三指长按计时
+        if (g_threeFingerStartTime > 0 && !g_threeFingerArmed) {
+            NSTimeInterval elapsed = [[NSDate date] timeIntervalSinceReferenceDate] - g_threeFingerStartTime;
+            if (elapsed >= 0.8) {
+                g_threeFingerArmed = YES;
+                inspectViewAtPoint(g_trackedPoint);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    @try { 
+                        UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; 
+                        [fb prepare]; 
+                        [fb impactOccurred]; 
+                    } @catch (NSException *e) {}
+                });
+            }
+        }
+    }
+}
+
+static void startDisplayLinkPolling() {
+    g_displayLink = [CADisplayLink displayLinkWithTarget:[NSNull null] selector:@selector(description)];
+    // 使用 C 函数回调方式避免 NSNull 问题
+    CFRunLoopSourceContext ctx = {0};
+    CFRunLoopSourceRef source = CFRunLoopSourceCreate(kCFAllocatorDefault, 0, &ctx);
+    CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopCommonModes);
+    CFRelease(source);
+    
+    // 实际使用 block 方式的 timer 作为 fallback
     dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, 0.05 * NSEC_PER_SEC, 0.01 * NSEC_PER_SEC);
     dispatch_source_set_event_handler(timer, ^{
-        @autoreleasepool {
-            // 获取当前屏幕上的活跃触摸
-            NSSet *activeTouches = nil;
-            for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                for (UIWindow *win in scene.windows) {
-                    @try {
-                        activeTouches = [win valueForKey:@"_touchData"];
-                        if (activeTouches) break;
-                    } @catch (NSException *e) {}
-                }
-                if (activeTouches) break;
-            }
-            
-            // 双指长按计时
-            if (g_twoFingerStartTime > 0 && !g_twoFingerArmed) {
-                NSTimeInterval elapsed = [[NSDate date] timeIntervalSinceReferenceDate] - g_twoFingerStartTime;
-                if (elapsed >= 0.8) {
-                    g_twoFingerArmed = YES;
-                    g_currentMode = AI_Mode_LearnArmed;
-                    showTopLevelToast(@"🎯 学习捕获已激活!\n请点击广告【跳过】按钮");
-                    UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-                    [fb impactOccurred];
-                }
-            }
-            
-            // 三指长按计时
-            if (g_threeFingerStartTime > 0 && !g_threeFingerArmed) {
-                NSTimeInterval elapsed = [[NSDate date] timeIntervalSinceReferenceDate] - g_threeFingerStartTime;
-                if (elapsed >= 0.8) {
-                    g_threeFingerArmed = YES;
-                    inspectViewAtPoint(g_trackedPoint);
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        @try { 
-                            UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; 
-                            [fb prepare]; 
-                            [fb impactOccurred]; 
-                        } @catch (NSException *e) {}
-                    });
-                }
-            }
-        }
+        displayLinkCallback(nil);
     });
     dispatch_resume(timer);
+    
+    NSLog(@"[AdInspector] ✅ DisplayLink polling started");
 }
 
-// ========== 全局 Hook（✅ v7.11 极简版，仅做轻量标记）==========
+// ========== 全局 Hook（✅ v7.12 仅处理学习模式的单指点击）==========
 %hook UIApplication
 
 - (void)sendEvent:(UIEvent *)event {
-    // ✅ 关键修复：模拟事件直接放行，不做任何自定义处理
     if (g_isSimulatingTouch) {
         %orig;
         return;
@@ -530,56 +658,10 @@ static void startGesturePolling() {
     UITouch *anyTouch = touches.anyObject;
     if (!anyTouch) return;
 
-    // ✅ 学习模式下捕获单指 touch ended
+    // ✅ 仅保留学习模式下的单指 touch ended 捕获
     if (g_currentMode == AI_Mode_LearnArmed && count == 1 && anyTouch.phase == UITouchPhaseEnded) {
         CGPoint endPoint = [anyTouch locationInView:anyTouch.window];
         tryLearnFromTouchEndPoint(endPoint, anyTouch.window);
-    }
-
-    // ✅ 双指：仅记录时间戳，计时交给轮询器
-    if (count == 2 && anyTouch.phase == UITouchPhaseBegan && g_twoFingerStartTime == 0) {
-        g_twoFingerStartTime = [[NSDate date] timeIntervalSinceReferenceDate];
-        g_twoFingerArmed = NO;
-        showTopLevelToast(@"⏳ 双指按住中...\n保持0.8s激活学习");
-    } else if (count != 2 && g_twoFingerStartTime > 0) {
-        if (!g_twoFingerArmed) {
-            g_twoFingerStartTime = 0;
-        }
-    }
-
-    // ✅ 三指：仅记录时间戳和位置，计时交给轮询器
-    if (count == 3) {
-        CGPoint centerPoint = CGPointZero;
-        NSInteger validCount = 0;
-        for (UITouch *touch in touches) {
-            CGPoint p = [touch locationInView:touch.window];
-            centerPoint.x += p.x; centerPoint.y += p.y; validCount++;
-        }
-        if (validCount > 0) { centerPoint.x /= validCount; centerPoint.y /= validCount; }
-        
-        if (anyTouch.phase == UITouchPhaseBegan && g_threeFingerStartTime == 0) {
-            g_threeFingerStartTime = [[NSDate date] timeIntervalSinceReferenceDate];
-            g_threeFingerArmed = NO;
-            g_trackedPoint = centerPoint;
-            showTopLevelToast(@"⏳ 三指按住中...\n保持0.8s诊断视图");
-        } else if (g_threeFingerStartTime > 0) {
-            g_trackedPoint = centerPoint;
-        }
-        
-        // 三指双击检测
-        if (anyTouch.phase == UITouchPhaseEnded && anyTouch.tapCount >= 2) {
-            g_twoFingerStartTime = 0; g_twoFingerArmed = NO;
-            g_threeFingerStartTime = 0; g_threeFingerArmed = NO;
-            BOOL ok = clearSkipConfig();
-            g_currentMode = AI_Mode_Observe;
-            showTopLevelToast(ok ? @"🗑️ 配置已清除\n已切回观察模式" : @"ℹ️ 无配置文件可清除");
-            UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
-            [fb impactOccurred];
-        }
-    } else if (count != 3 && g_threeFingerStartTime > 0) {
-        if (!g_threeFingerArmed) {
-            g_threeFingerStartTime = 0;
-        }
     }
 }
 
@@ -636,7 +718,7 @@ static void startGesturePolling() {
 }
 %end
 
-// ========== ✅ v7.11 入口 ==========
+// ========== ✅ v7.12 入口 ==========
 static void scheduleTouchAutoSkipWithRetry(NSString *targetClass, int maxRetries) {
     __block int attempt = 0;
     void (^tryOnce)(void) = nil;
@@ -665,8 +747,29 @@ static void scheduleTouchAutoSkipWithRetry(NSString *targetClass, int maxRetries
 }
 
 %ctor {
-    // ✅ 启动手势轮询器
-    startGesturePolling();
+    // ✅ 启动轮询器
+    startDisplayLinkPolling();
+    
+    // ✅ 延迟安装自定义手势识别器（等待窗口就绪）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            for (UIWindow *win in scene.windows) {
+                AITwoFingerLongPressRecognizer *twoFinger = [[AITwoFingerLongPressRecognizer alloc] initWithTarget:nil action:nil];
+                twoFinger.cancelsTouchesInView = NO;
+                twoFinger.delaysTouchesBegan = NO;
+                twoFinger.delaysTouchesEnded = NO;
+                [win addGestureRecognizer:twoFinger];
+                
+                AIThreeFingerLongPressRecognizer *threeFinger = [[AIThreeFingerLongPressRecognizer alloc] initWithTarget:nil action:nil];
+                threeFinger.cancelsTouchesInView = NO;
+                threeFinger.delaysTouchesBegan = NO;
+                threeFinger.delaysTouchesEnded = NO;
+                [win addGestureRecognizer:threeFinger];
+                
+                NSLog(@"[AdInspector] ✅ Gesture recognizers installed on window: %@", win);
+            }
+        }
+    });
     
     NSDictionary *config = loadSkipConfig();
     if (config && config[@"targetClass"] && config[@"selectorName"]) {
@@ -674,18 +777,18 @@ static void scheduleTouchAutoSkipWithRetry(NSString *targetClass, int maxRetries
         NSString *sn = config[@"selectorName"];
         if ([sn isEqualToString:@"__adinspector_touch_skip__"]) {
             g_currentMode = AI_Mode_AutoSkip;
-            showTopLevelToast([NSString stringWithFormat:@"🚀 AdInspector v7.11\n【Touch自动模式】\n%@\n\n双指长按=学习\n三指长按=诊断\n三指双击=清除", tc]);
+            showTopLevelToast([NSString stringWithFormat:@"🚀 AdInspector v7.12\n【Touch自动模式】\n%@\n\n双指长按=学习\n三指长按=诊断\n三指双击=清除", tc]);
             scheduleTouchAutoSkipWithRetry(tc, 8);
         } else {
             g_currentMode = AI_Mode_AutoSkip;
-            showTopLevelToast([NSString stringWithFormat:@"🚀 AdInspector v7.11\n【自动模式】\n%@.%@\n\n双指长按=学习\n三指长按=诊断\n三指双击=清除", tc, sn]);
+            showTopLevelToast([NSString stringWithFormat:@"🚀 AdInspector v7.12\n【自动模式】\n%@.%@\n\n双指长按=学习\n三指长按=诊断\n三指双击=清除", tc, sn]);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 performAutoSkip();
             });
         }
     } else {
         g_currentMode = AI_Mode_Observe;
-        showTopLevelToast(@"👁️ AdInspector v7.11\n【观察模式】不干预任何操作\n\n双指长按0.8s=激活学习\n三指长按0.8s=诊断视图\n三指双击=清除配置");
+        showTopLevelToast(@"👁️ AdInspector v7.12\n【观察模式】不干预任何操作\n\n双指长按0.8s=激活学习\n三指长按0.8s=诊断视图\n三指双击=清除配置");
     }
-    NSLog(@"[AdInspector] ✅ v7.11 loaded. Mode: %ld, ConfigPath: %@", (long)g_currentMode, getConfigPath());
+    NSLog(@"[AdInspector] ✅ v7.12 loaded. Mode: %ld, ConfigPath: %@", (long)g_currentMode, getConfigPath());
 }

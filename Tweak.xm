@@ -337,78 +337,82 @@ static void performAutoSkip() {
 }
 
 // ========== 学习通道（v7.16 增强版）==========
+// ========== 学习通道（v7.17 盲录模式）==========
 static void tryLearnFromTouchEndPoint(CGPoint point, UIWindow *window) {
     if (g_currentMode != AI_Mode_LearnArmed || !window) return;
     
+    // ✅ 盲录：不做任何 isSkipRelatedText 判断，直接捕获点击目标
     UIView *hitView = [window hitTest:point withEvent:nil];
-    if (!hitView) return;
+    if (!hitView) {
+        showTopLevelToast(@"❌ 未命中任何视图");
+        return;
+    }
     
-    NSLog(@"[AdInspector] 🎯 Learn mode touch at: %@", NSStringFromClass([hitView class]));
+    NSString *targetClass = NSStringFromClass([hitView class]);
+    NSString *selName = nil;
+    NSString *captureMethod = @"未知";
     
-    UIView *current = hitView;
-    NSInteger depth = 0;
-    BOOL learned = NO;
+    // 1. 优先从当前视图的手势中提取
+    for (UIGestureRecognizer *gr in hitView.gestureRecognizers) {
+        NSArray *gas = extractGestureActions(gr);
+        for (NSString *info in gas) {
+            NSRange ar = [info rangeOfString:@" -> "];
+            if (ar.location != NSNotFound) {
+                selName = [info substringFromIndex:ar.location + 4];
+                captureMethod = @"本视图手势";
+                break;
+            }
+        }
+        if (selName) break;
+    }
     
-    while (current && depth < 10 && !learned) {
-        NSString *text = extractAllTextRecursive(current, 15);
-        BOOL textMatched = isSkipRelatedText(text);
-        
-        // ✅ 增强：小尺寸+有手势=自动捕获（兜底纯图标按钮）
-        BOOL isSmallInteractiveView = (current.bounds.size.width <= 100 && 
-                                       current.bounds.size.height <= 100 && 
-                                       current.gestureRecognizers.count > 0);
-        
-        if (textMatched || isSmallInteractiveView) {
-            NSString *targetClass = NSStringFromClass([current class]);
-            NSString *selName = @"__adinspector_touch_skip__";
-            
+    // 2. 如果是 UIControl，记录 sendAction
+    if (!selName && [hitView isKindOfClass:[UIControl class]]) {
+        selName = @"__adinspector_control_skip__";
+        captureMethod = @"UIControl";
+    }
+    
+    // 3. 向上遍历响应链查找手势（最多 8 层）
+    if (!selName) {
+        UIView *current = hitView.superview;
+        NSInteger depth = 0;
+        while (current && depth < 8) {
             for (UIGestureRecognizer *gr in current.gestureRecognizers) {
                 NSArray *gas = extractGestureActions(gr);
                 for (NSString *info in gas) {
                     NSRange ar = [info rangeOfString:@" -> "];
                     if (ar.location != NSNotFound) {
                         selName = [info substringFromIndex:ar.location + 4];
+                        targetClass = NSStringFromClass([current class]); // ✅ 更新为实际持有手势的类
+                        captureMethod = [NSString stringWithFormat:@"父级第%ld层手势", (long)(depth + 1)];
                         break;
                     }
                 }
-                if (![selName isEqualToString:@"__adinspector_touch_skip__"]) break;
+                if (selName) break;
             }
-            
-            if ([selName isEqualToString:@"__adinspector_touch_skip__"] && current.superview) {
-                for (UIGestureRecognizer *gr in current.superview.gestureRecognizers) {
-                    NSArray *gas = extractGestureActions(gr);
-                    for (NSString *info in gas) {
-                        NSRange ar = [info rangeOfString:@" -> "];
-                        if (ar.location != NSNotFound) {
-                            selName = [info substringFromIndex:ar.location + 4];
-                            break;
-                        }
-                    }
-                    if (![selName isEqualToString:@"__adinspector_touch_skip__"]) break;
-                }
-            }
-            
-            saveSkipConfig(targetClass, selName);
-            g_currentMode = AI_Mode_Observe;
-            
-            UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-            [fb impactOccurred];
-            
-            showTopLevelToast([NSString stringWithFormat:@"✅ 学习成功!\n%@.%@\n%@", 
-                              targetClass, selName, 
-                              textMatched ? @"(文本匹配)" : @"(小视图+手势兜底)"]);
-            learned = YES;
-            return;
+            if (selName) break;
+            current = current.superview;
+            depth++;
         }
-        
-        current = current.superview;
-        depth++;
     }
     
-    if (!learned) {
-        showTopLevelToast([NSString stringWithFormat:@"⚠️ 未识别为跳过按钮\n类名: %@\n请尝试点击按钮中心位置", 
-                          NSStringFromClass([hitView class])]);
+    // 4. 最终兜底：如果连手势都没有，记录 hitTest 命中的类名
+    if (!selName) {
+        selName = @"__adinspector_hittest_fallback__";
+        captureMethod = @"HitTest兜底(无手势)";
     }
+    
+    // ✅ 无条件保存
+    saveSkipConfig(targetClass, selName);
+    g_currentMode = AI_Mode_Observe;
+    
+    UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [fb impactOccurred];
+    
+    NSString *text = extractAllTextRecursive(hitView, 5);
+    showTopLevelToast([NSString stringWithFormat:@"✅ 盲录成功!\n类: %@\n方法: %@\n来源: %@\n文本: %@", 
+                      targetClass, selName, captureMethod, 
+                      text.length > 0 ? text : @"(无文本)"]);
 }
 
 static BOOL tryLearnFromSender(id sender, id target, SEL action) {

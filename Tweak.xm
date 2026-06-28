@@ -2,7 +2,7 @@
 #import <objc/runtime.h>
 
 // ==================== 配置与常量 ====================
-static NSString *const kConfigKey = @"AdInspector_Config_v85";
+static NSString *const kConfigKey = @"AdInspector_Config_v86";
 static NSString *const kLearnModeKey = @"AdInspector_LearnMode";
 static NSTimeInterval const kConfigExpireInterval = 24 * 60 * 60;
 
@@ -24,22 +24,39 @@ static NSDictionary *extractFeatures(UIView *target, UIWindow *window);
 static UIWindow *getActiveNormalWindow(void);
 static void showLearnPanel(void);
 static void performAutoSkip(void);
+static void bindGesturesToWindow(UIWindow *w);
 
-// ==================== ✅ 核心修复: 专用事件处理器单例 ====================
-@interface AIPEventHandler : NSObject
+// ==================== ✅ 核心修复: 支持手势并发的 EventHandler ====================
+@interface AIPEventHandler : NSObject <UIGestureRecognizerDelegate>
 - (void)handleEdgePan:(UIScreenEdgePanGestureRecognizer *)gesture;
 - (void)handleLearnTap:(UITapGestureRecognizer *)gesture;
 - (void)handleCancelLearn:(UIButton *)btn;
 - (void)handleTripleTap:(UITapGestureRecognizer *)gesture;
+- (void)handleShake;
 @end
 
 @implementation AIPEventHandler
+
+// ✅ 关键修复: 允许与 App 自身的手势同时识别
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return YES;
+}
 
 - (void)handleEdgePan:(UIScreenEdgePanGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateEnded) return;
     BOOL isLearnMode = [NSUserDefaults.standardUserDefaults boolForKey:kLearnModeKey];
     [NSUserDefaults.standardUserDefaults setBool:!isLearnMode forKey:kLearnModeKey];
     showToast(isLearnMode ? @"📖 学习模式已关闭" : @"🎯 学习模式已开启\n请点击广告跳过按钮");
+    if (!isLearnMode) {
+        showLearnPanel();
+    }
+}
+
+// ✅ 新增: 摇一摇触发学习模式（备用入口）
+- (void)handleShake {
+    BOOL isLearnMode = [NSUserDefaults.standardUserDefaults boolForKey:kLearnModeKey];
+    [NSUserDefaults.standardUserDefaults setBool:!isLearnMode forKey:kLearnModeKey];
+    showToast(isLearnMode ? @"📖 学习模式已关闭" : @"🎯 学习模式已开启(摇一摇)\n请点击广告跳过按钮");
     if (!isLearnMode) {
         showLearnPanel();
     }
@@ -54,7 +71,6 @@ static void performAutoSkip(void);
     UIWindow *realWindow = getActiveNormalWindow();
     if (!realWindow) { showToast(@"⚠️ 未找到活跃窗口"); return; }
     
-    // 临时隐藏学习窗口以获取底层真实视图
     lw.hidden = YES;
     UIView *hitView = [realWindow hitTest:screenPoint withEvent:nil];
     lw.hidden = NO;
@@ -106,16 +122,34 @@ static AIPEventHandler *getHandler(void) {
     return g_handler;
 }
 
-// ==================== ✅ 注入验证构造函数 ====================
+// ==================== 窗口手势绑定工具 ====================
+static void bindGesturesToWindow(UIWindow *w) {
+    if (!w) return;
+    AIPEventHandler *handler = getHandler();
+    
+    // 检查是否已绑定，避免重复
+    for (UIGestureRecognizer *g in w.gestureRecognizers) {
+        if ([g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]] && g.target == handler) return;
+    }
+    
+    UIScreenEdgePanGestureRecognizer *edgePan = [[UIScreenEdgePanGestureRecognizer alloc] initWithTarget:handler action:@selector(handleEdgePan:)];
+    edgePan.edges = UIRectEdgeLeft;
+    edgePan.delegate = handler; // ✅ 设置代理以支持并发识别
+    [w addGestureRecognizer:edgePan];
+    
+    NSLog(@"[AdInspector] ✅ 手势已绑定到窗口: %@", w);
+}
+
+// ==================== ✅ 注入验证 + Scene 通知监听 ====================
 %ctor {
     NSLog(@"[AdInspector] ✅ Tweak 已成功加载到进程: %@", [[NSBundle mainBundle] bundleIdentifier]);
     
-    // 延迟弹出系统级 Alert 作为终极注入验证
+    // 注入验证 Alert
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"AdInspector v8.5"
-                                                                       message:[NSString stringWithFormat:@"Tweak 已注入成功！\nBundleID: %@\n如果看不到此弹窗，说明注入失败。", [[NSBundle mainBundle] bundleIdentifier]]
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"AdInspector v8.6"
+                                                                       message:[NSString stringWithFormat:@"✅ 注入成功！\nBundleID: %@\n\n触发方式：\n• 左边缘右滑\n• 摇一摇手机\n• 三指双击(跳过)", [[NSBundle mainBundle] bundleIdentifier]]
                                                                 preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:nil]];
         
         UIViewController *topVC = nil;
         for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -123,53 +157,52 @@ static AIPEventHandler *getHandler(void) {
                 for (UIWindow *w in scene.windows) {
                     if (w.rootViewController && !w.isHidden) {
                         topVC = w.rootViewController;
-                        while (topVC.presentedViewController) {
-                            topVC = topVC.presentedViewController;
-                        }
+                        while (topVC.presentedViewController) topVC = topVC.presentedViewController;
                         break;
                     }
                 }
             }
         }
-        if (topVC) {
-            [topVC presentViewController:alert animated:YES completion:nil];
-        } else {
-            // 兜底：如果找不到 VC，直接用 Toast 提示
-            showToast(@"✅ AdInspector v8.5 已注入\n但未找到顶层VC显示Alert");
-        }
+        if (topVC) [topVC presentViewController:alert animated:YES completion:nil];
+        else showToast(@"✅ AdInspector v8.6 已注入");
     });
+    
+    // ✅ 关键修复: 使用 Scene 通知实时监听窗口创建，替代 didFinishLaunching 延迟
+    [[NSNotificationCenter defaultCenter] addObserverForName:UISceneDidActivateNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification *note) {
+        if ([note.object isKindOfClass:[UIWindowScene class]]) {
+            UIWindowScene *scene = (UIWindowScene *)note.object;
+            for (UIWindow *w in scene.windows) {
+                bindGesturesToWindow(w);
+            }
+        }
+    }];
 }
 
-// ==================== Hook 入口 (单一 %hook 块) ====================
+// ==================== Hook UIApplication ====================
 %hook UIApplication
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     BOOL result = %orig;
-    
-    // 延迟注册手势，确保 Scene 和 Window 已就绪
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        AIPEventHandler *handler = getHandler();
-        
+    // 兜底：对已存在的窗口也绑定一次
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         for (UIWindowScene *scene in application.connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive) {
-                for (UIWindow *w in scene.windows) {
-                    // 避免重复添加
-                    BOOL hasPan = NO;
-                    for (UIGestureRecognizer *g in w.gestureRecognizers) {
-                        if ([g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) { hasPan = YES; break; }
-                    }
-                    if (!hasPan) {
-                        UIScreenEdgePanGestureRecognizer *edgePan = [[UIScreenEdgePanGestureRecognizer alloc] initWithTarget:handler action:@selector(handleEdgePan:)];
-                        edgePan.edges = UIRectEdgeLeft;
-                        [w addGestureRecognizer:edgePan];
-                        NSLog(@"[AdInspector] ✅ 边缘手势已添加到窗口: %@", w);
-                    }
-                }
+            for (UIWindow *w in scene.windows) {
+                bindGesturesToWindow(w);
             }
         }
     });
-    
     return result;
+}
+
+// ✅ 新增: 拦截摇一摇事件
+- (void)motionEnded:(UIEventSubtype)motion withEvent:(UIEvent *)event {
+    if (motion == UIEventSubtypeMotionShake) {
+        [getHandler() handleShake];
+    }
+    %orig;
 }
 
 %end
@@ -206,9 +239,7 @@ static void showLearnPanel(void) {
     lw.userInteractionEnabled = YES;
     
     CGFloat safeBottom = 0;
-    if (@available(iOS 11.0, *)) {
-        safeBottom = lw.safeAreaInsets.bottom;
-    }
+    if (@available(iOS 11.0, *)) safeBottom = lw.safeAreaInsets.bottom;
     CGFloat hintHeight = 50;
     CGFloat hintY = sh - safeBottom - hintHeight - 20;
     
@@ -225,8 +256,7 @@ static void showLearnPanel(void) {
     [lw addSubview:hint];
     
     UIButton *cancelBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    CGFloat cancelY = hintY - 54;
-    cancelBtn.frame = CGRectMake(sw / 2 - 60, cancelY, 120, 44);
+    cancelBtn.frame = CGRectMake(sw / 2 - 60, hintY - 54, 120, 44);
     [cancelBtn setTitle:@"取消学习" forState:UIControlStateNormal];
     [cancelBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     cancelBtn.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.8];
@@ -252,20 +282,14 @@ static void performAutoSkip(void) {
     }
     if (orientation != UIInterfaceOrientationUnknown &&
         orientation != UIInterfaceOrientationPortrait && 
-        orientation != UIInterfaceOrientationPortraitUpsideDown) {
-        return;
-    }
+        orientation != UIInterfaceOrientationPortraitUpsideDown) return;
     
     NSDictionary *config = loadConfig();
-    if (!config || !config[@"features"]) {
-        showToast(@"⚠️ 跳过失败：请先左滑学习");
-        return;
-    }
+    if (!config || !config[@"features"]) { showToast(@"⚠️ 跳过失败：请先学习"); return; }
     
     NSTimeInterval ts = [config[@"timestamp"] doubleValue];
     if ([[NSDate date] timeIntervalSince1970] - ts > kConfigExpireInterval) {
-        showToast(@"⏰ 配置已过期，请重新学习");
-        return;
+        showToast(@"⏰ 配置已过期，请重新学习"); return;
     }
     
     NSDictionary *features = config[@"features"];
@@ -275,9 +299,7 @@ static void performAutoSkip(void) {
     AISkipTarget target = searchByClassAndText(realWindow, features);
     if (!target.found) target = searchByIndexPath(realWindow, features);
     if (!target.found) {
-        CGFloat xR = [features[@"xRatio"] floatValue];
-        CGFloat yR = [features[@"yRatio"] floatValue];
-        target = searchByRelativeCoordinate(realWindow, xR, yR);
+        target = searchByRelativeCoordinate(realWindow, [features[@"xRatio"] floatValue], [features[@"yRatio"] floatValue]);
     }
     
     if (target.found && target.targetView) {
@@ -293,19 +315,16 @@ static void performAutoSkip(void) {
         }
         showToast(@"✅ 自动跳过成功");
     } else {
-        showToast(@"❌ 跳过失败：目标元素未找到\n请重新学习");
+        showToast(@"❌ 跳过失败：目标未找到\n请重新学习");
     }
 }
 
 // ==================== 核心算法实现 ====================
-
 static UIWindow *getActiveNormalWindow(void) {
     for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
         if (scene.activationState == UISceneActivationStateForegroundActive) {
             for (UIWindow *w in scene.windows) {
-                if (w.windowLevel == UIWindowLevelNormal && !w.isHidden) {
-                    return w;
-                }
+                if (w.windowLevel == UIWindowLevelNormal && !w.isHidden) return w;
             }
         }
     }
@@ -322,8 +341,7 @@ static UIView *findRealInteractiveTarget(UIView *hitView, UIWindow *window) {
             }
         }
         if (realTarget.isAccessibilityElement && (realTarget.accessibilityTraits & UIAccessibilityTraitButton)) return realTarget;
-        SEL touchSel = @selector(touchesEnded:withEvent:);
-        if ([realTarget respondsToSelector:touchSel] && 
+        if ([realTarget respondsToSelector:@selector(touchesEnded:withEvent:)] && 
             ![realTarget isKindOfClass:[UILabel class]] && 
             ![realTarget isKindOfClass:[UIImageView class]]) return realTarget;
         realTarget = realTarget.superview;
@@ -334,34 +352,28 @@ static UIView *findRealInteractiveTarget(UIView *hitView, UIWindow *window) {
 static NSDictionary *extractFeatures(UIView *target, UIWindow *window) {
     NSMutableDictionary *features = [NSMutableDictionary dictionary];
     features[@"className"] = NSStringFromClass([target class]);
-    
-    CGRect frameInWindow = [target convertRect:target.bounds toView:window];
-    CGFloat wW = window.bounds.size.width;
-    CGFloat wH = window.bounds.size.height;
-    features[@"xRatio"] = @((frameInWindow.origin.x + frameInWindow.size.width / 2.0) / wW);
-    features[@"yRatio"] = @((frameInWindow.origin.y + frameInWindow.size.height / 2.0) / wH);
+    CGRect f = [target convertRect:target.bounds toView:window];
+    features[@"xRatio"] = @((f.origin.x + f.size.width / 2.0) / window.bounds.size.width);
+    features[@"yRatio"] = @((f.origin.y + f.size.height / 2.0) / window.bounds.size.height);
     
     NSMutableString *textContext = [NSMutableString string];
-    NSMutableArray *subviews = [NSMutableArray arrayWithObject:target];
+    NSMutableArray *subs = [NSMutableArray arrayWithObject:target];
     NSInteger idx = 0;
-    while (idx < (NSInteger)subviews.count) {
-        UIView *v = subviews[idx++];
-        [subviews addObjectsFromArray:v.subviews];
+    while (idx < (NSInteger)subs.count) {
+        UIView *v = subs[idx++];
+        [subs addObjectsFromArray:v.subviews];
         NSString *txt = nil;
         if ([v isKindOfClass:[UILabel class]]) txt = ((UILabel *)v).text;
         else if ([v isKindOfClass:[UIButton class]]) txt = ((UIButton *)v).currentTitle;
         else txt = v.accessibilityLabel;
-        if (txt.length > 0 && txt.length < 30) {
-            [textContext appendFormat:@"%@|", txt];
-        }
+        if (txt.length > 0 && txt.length < 30) [textContext appendFormat:@"%@|", txt];
     }
     if (textContext.length > 0) features[@"textContent"] = textContext;
     
     NSMutableArray *indexPath = [NSMutableArray array];
     UIView *v = target;
     while (v.superview && v != window) {
-        NSInteger i = [v.superview.subviews indexOfObject:v];
-        [indexPath insertObject:@(i) atIndex:0];
+        [indexPath insertObject:@([v.superview.subviews indexOfObject:v]) atIndex:0];
         v = v.superview;
     }
     features[@"indexPath"] = indexPath;
@@ -373,124 +385,97 @@ static AISkipTarget searchByClassAndText(UIWindow *window, NSDictionary *feature
     NSString *clsName = features[@"className"];
     NSString *savedText = features[@"textContent"];
     if (!clsName || !savedText) return result;
+    Class tc = NSClassFromString(clsName);
+    if (!tc) return result;
     
-    Class targetClass = NSClassFromString(clsName);
-    if (!targetClass) return result;
-    
-    __block UIView *matchedView = nil;
-    void (^recursiveSearch)(UIView *) = nil;
-    recursiveSearch = ^(UIView *view) {
-        if (matchedView) return;
-        if ([view isKindOfClass:targetClass]) {
-            NSString *currentText = @"";
-            if ([view isKindOfClass:[UILabel class]]) currentText = ((UILabel *)view).text ?: @"";
-            else if ([view isKindOfClass:[UIButton class]]) currentText = ((UIButton *)view).currentTitle ?: @"";
-            else currentText = view.accessibilityLabel ?: @"";
-            
-            NSArray *keywords = [savedText componentsSeparatedByString:@"|"];
-            for (NSString *kw in keywords) {
-                if (kw.length > 0 && [currentText containsString:kw]) {
-                    matchedView = view;
-                    return;
-                }
+    __block UIView *matched = nil;
+    void (^search)(UIView *) = nil;
+    search = ^(UIView *view) {
+        if (matched) return;
+        if ([view isKindOfClass:tc]) {
+            NSString *ct = @"";
+            if ([view isKindOfClass:[UILabel class]]) ct = ((UILabel *)view).text ?: @"";
+            else if ([view isKindOfClass:[UIButton class]]) ct = ((UIButton *)view).currentTitle ?: @"";
+            else ct = view.accessibilityLabel ?: @"";
+            for (NSString *kw in [savedText componentsSeparatedByString:@"|"]) {
+                if (kw.length > 0 && [ct containsString:kw]) { matched = view; return; }
             }
         }
-        for (UIView *sub in view.subviews) {
-            recursiveSearch(sub);
-        }
+        for (UIView *sub in view.subviews) search(sub);
     };
-    recursiveSearch(window);
-    
-    if (matchedView) {
-        result.found = YES;
-        result.targetView = matchedView;
-        result.point = [matchedView convertPoint:CGPointMake(matchedView.bounds.size.width/2, matchedView.bounds.size.height/2) toView:window];
+    search(window);
+    if (matched) {
+        result.found = YES; result.targetView = matched;
+        result.point = [matched convertPoint:CGPointMake(matched.bounds.size.width/2, matched.bounds.size.height/2) toView:window];
     }
     return result;
 }
 
 static AISkipTarget searchByIndexPath(UIWindow *window, NSDictionary *features) {
     AISkipTarget result = {0};
-    NSArray *indexPath = features[@"indexPath"];
-    if (!indexPath || indexPath.count == 0) return result;
-    
-    UIView *current = window;
-    for (NSNumber *idxNum in indexPath) {
-        NSInteger i = [idxNum integerValue];
-        if (i >= (NSInteger)current.subviews.count) return result;
-        current = current.subviews[i];
+    NSArray *ip = features[@"indexPath"];
+    if (!ip.count) return result;
+    UIView *cur = window;
+    for (NSNumber *n in ip) {
+        NSInteger i = n.integerValue;
+        if (i >= (NSInteger)cur.subviews.count) return result;
+        cur = cur.subviews[i];
     }
-    
-    NSString *savedClass = features[@"className"];
-    if (savedClass && ![NSStringFromClass([current class]) isEqualToString:savedClass]) return result;
-    
-    result.found = YES;
-    result.targetView = current;
-    result.point = [current convertPoint:CGPointMake(current.bounds.size.width/2, current.bounds.size.height/2) toView:window];
+    NSString *sc = features[@"className"];
+    if (sc && ![NSStringFromClass(cur.class) isEqualToString:sc]) return result;
+    result.found = YES; result.targetView = cur;
+    result.point = [cur convertPoint:CGPointMake(cur.bounds.size.width/2, cur.bounds.size.height/2) toView:window];
     return result;
 }
 
 static AISkipTarget searchByRelativeCoordinate(UIWindow *window, CGFloat xR, CGFloat yR) {
     AISkipTarget result = {0};
-    CGFloat wW = window.bounds.size.width;
-    CGFloat wH = window.bounds.size.height;
-    CGPoint targetPoint = CGPointMake(xR * wW, yR * wH);
-    UIView *hit = [window hitTest:targetPoint withEvent:nil];
-    if (hit) {
-        result.found = YES;
-        result.targetView = hit;
-        result.point = targetPoint;
-    }
+    CGPoint p = CGPointMake(xR * window.bounds.size.width, yR * window.bounds.size.height);
+    UIView *hit = [window hitTest:p withEvent:nil];
+    if (hit) { result.found = YES; result.targetView = hit; result.point = p; }
     return result;
 }
 
 // ==================== 配置持久化 ====================
 static NSDictionary *loadConfig(void) {
-    NSData *data = [NSUserDefaults.standardUserDefaults dataForKey:kConfigKey];
-    if (!data) return nil;
-    return [NSKeyedUnarchiver unarchivedObjectOfClass:[NSDictionary class] fromData:data error:nil];
+    NSData *d = [NSUserDefaults.standardUserDefaults dataForKey:kConfigKey];
+    return d ? [NSKeyedUnarchiver unarchivedObjectOfClass:[NSDictionary class] fromData:d error:nil] : nil;
 }
-
 static void saveConfig(NSDictionary *config) {
-    NSData *data = [NSKeyedArchiver archivedDataWithRootObject:config requiringSecureCoding:NO error:nil];
-    [NSUserDefaults.standardUserDefaults setObject:data forKey:kConfigKey];
+    NSData *d = [NSKeyedArchiver archivedDataWithRootObject:config requiringSecureCoding:NO error:nil];
+    [NSUserDefaults.standardUserDefaults setObject:d forKey:kConfigKey];
     [NSUserDefaults.standardUserDefaults synchronize];
 }
 
-// ==================== ✅ Toast: 独立高层级 UIWindow ====================
+// ==================== Toast ====================
 static void showToast(NSString *msg) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *toastWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        toastWin.windowLevel = UIWindowLevelAlert + 200;
-        toastWin.backgroundColor = [UIColor clearColor];
-        toastWin.userInteractionEnabled = NO;
-        toastWin.hidden = NO;
+        UIWindow *tw = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        tw.windowLevel = UIWindowLevelAlert + 200;
+        tw.backgroundColor = [UIColor clearColor];
+        tw.userInteractionEnabled = NO;
+        tw.hidden = NO;
         
-        UILabel *toast = [[UILabel alloc] init];
-        toast.text = msg;
-        toast.numberOfLines = 0;
-        toast.textColor = [UIColor whiteColor];
-        toast.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-        toast.textAlignment = NSTextAlignmentCenter;
-        toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
-        toast.layer.cornerRadius = 10;
-        toast.clipsToBounds = YES;
+        UILabel *t = [[UILabel alloc] init];
+        t.text = msg; t.numberOfLines = 0;
+        t.textColor = [UIColor whiteColor];
+        t.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+        t.textAlignment = NSTextAlignmentCenter;
+        t.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
+        t.layer.cornerRadius = 10; t.clipsToBounds = YES;
         
-        CGFloat maxWidth = toastWin.bounds.size.width - 60;
-        CGSize textSize = [msg boundingRectWithSize:CGSizeMake(maxWidth, CGFLOAT_MAX)
-                                           options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
-                                        attributes:@{NSFontAttributeName: toast.font}
-                                           context:nil].size;
-        toast.frame = CGRectMake(0, 0, MIN(textSize.width + 30, maxWidth), textSize.height + 20);
-        toast.center = CGPointMake(toastWin.center.x, toastWin.bounds.size.height - 120);
-        
-        [toastWin addSubview:toast];
+        CGFloat mw = tw.bounds.size.width - 60;
+        CGSize sz = [msg boundingRectWithSize:CGSizeMake(mw, CGFLOAT_MAX)
+                                      options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                   attributes:@{NSFontAttributeName: t.font} context:nil].size;
+        t.frame = CGRectMake(0, 0, MIN(sz.width + 30, mw), sz.height + 20);
+        t.center = CGPointMake(tw.center.x, tw.bounds.size.height - 120);
+        [tw addSubview:t];
         
         [UIView animateWithDuration:0.3 delay:2.5 options:UIViewAnimationOptionCurveEaseOut animations:^{
-            toast.alpha = 0;
+            t.alpha = 0;
         } completion:^(BOOL finished) {
-            [toast removeFromSuperview];
-            toastWin.hidden = YES;
+            [t removeFromSuperview]; tw.hidden = YES;
         }];
     });
 }

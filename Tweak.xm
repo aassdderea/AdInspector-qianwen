@@ -72,33 +72,6 @@ static void showToast(NSString *msg) {
     });
 }
 
-// ========== 文本提取 ==========
-static NSString* extractTextRecursive(UIView *v, NSInteger depth) {
-    if (depth <= 0 || !v) return @"";
-    NSMutableString *s = [NSMutableString string];
-    if ([v isKindOfClass:[UILabel class]]) {
-        UILabel *l = (UILabel *)v;
-        if (l.text) [s appendString:l.text];
-    } else if ([v isKindOfClass:[UIButton class]]) {
-        UIButton *b = (UIButton *)v;
-        NSString *t = [b titleForState:UIControlStateNormal];
-        if (t) [s appendString:t];
-    }
-    for (UIView *sub in v.subviews) {
-        NSString *st = extractTextRecursive(sub, depth - 1);
-        if (st.length > 0) [s appendString:st];
-    }
-    return s;
-}
-
-static BOOL isSkipText(NSString *text) {
-    if (!text.length) return NO;
-    NSString *l = [text lowercaseString];
-    return [l containsString:@"跳过"] || [l containsString:@"skip"] ||
-           [l containsString:@"close"] || [l containsString:@"关闭"] ||
-           [l containsString:@"✕"] || [l containsString:@"×"];
-}
-
 // ========== 手势动作提取 ==========
 static NSArray<NSString*>* getGestureActions(UIGestureRecognizer *gr) {
     NSMutableArray *r = [NSMutableArray array];
@@ -125,6 +98,7 @@ static void performAutoSkip() {
         CGFloat rx = [cfg[@"relX"] floatValue];
         CGFloat ry = [cfg[@"relY"] floatValue];
         
+        // 优先使用相对坐标点击
         if (rx > 0 && ry > 0) {
             for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
                 for (UIWindow *win in scene.windows) {
@@ -152,6 +126,7 @@ static void performAutoSkip() {
             }
         }
         
+        // 兜底：类名+选择器查找
         if (tc.length && sn.length) {
             Class cls = NSClassFromString(tc);
             SEL sel = NSSelectorFromString(sn);
@@ -188,7 +163,7 @@ static void performAutoSkip() {
     }
 }
 
-// ========== 学习面板辅助类（解决 block 回调问题）==========
+// ========== 学习面板 Handler ==========
 @interface AdInspectorLearnHandler : NSObject
 @property (nonatomic, weak) UIWindow *learnWindow;
 - (void)handleLearnTap:(UITapGestureRecognizer *)gesture;
@@ -197,12 +172,14 @@ static void performAutoSkip() {
 @implementation AdInspectorLearnHandler
 - (void)handleLearnTap:(UITapGestureRecognizer *)gesture {
     CGPoint p = [gesture locationInView:self.learnWindow];
+    // 点击顶部提示区域视为取消
     if (p.y < 130) {
         self.learnWindow.hidden = YES;
         showToast(@"❌ 学习已取消");
         return;
     }
     
+    // 获取真实 KeyWindow
     UIWindow *realWindow = nil;
     for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
         for (UIWindow *w in scene.windows) {
@@ -216,9 +193,11 @@ static void performAutoSkip() {
         return;
     }
     
+    // 记录相对坐标 (0.0 ~ 1.0)
     CGFloat relX = p.x / self.learnWindow.bounds.size.width;
     CGFloat relY = p.y / self.learnWindow.bounds.size.height;
     
+    // 尝试提取目标类名和手势选择器
     NSString *tc = NSStringFromClass([hit class]);
     NSString *sn = @"__coordinate_skip__";
     for (UIGestureRecognizer *gr in hit.gestureRecognizers) {
@@ -249,7 +228,7 @@ static void performAutoSkip() {
 }
 @end
 
-// ========== 边缘滑动辅助类 ==========
+// ========== 边缘滑动 Handler ==========
 @interface AdInspectorEdgeHandler : NSObject
 - (void)handleEdgeSwipe:(UIScreenEdgePanGestureRecognizer *)gesture;
 @end
@@ -257,15 +236,14 @@ static void performAutoSkip() {
 @implementation AdInspectorEdgeHandler
 - (void)handleEdgeSwipe:(UIScreenEdgePanGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateRecognized) {
-        // 内联学习面板创建逻辑
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
                 UIWindow *lw = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
                 lw.windowLevel = UIWindowLevelAlert + 2000;
                 lw.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.15];
                 
-                UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(20, 60, lw.bounds.size.width - 40, 60)];
-                hint.text = @"🎯 学习模式\n请点击广告上的【跳过】按钮\n点击空白处取消";
+                UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(20, 60, lw.bounds.size.width - 40, 80)];
+                hint.text = @"🎯 学习模式\n请点击广告上的【跳过】按钮\n点击顶部空白处取消";
                 hint.numberOfLines = 0;
                 hint.textColor = [UIColor whiteColor];
                 hint.font = [UIFont boldSystemFontOfSize:16];
@@ -280,7 +258,7 @@ static void performAutoSkip() {
                 UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:handler action:@selector(handleLearnTap:)];
                 [lw addGestureRecognizer:tap];
                 
-                // 保持 handler 引用防止释放
+                // 防止 handler 被 ARC 释放
                 objc_setAssociatedObject(lw, "learnHandler", handler, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 
                 [lw makeKeyAndVisible];
@@ -317,7 +295,7 @@ static void installEdgeSwipe() {
     });
 }
 
-// ========== 三指双击清除 ==========
+// ========== 三指双击清除配置 ==========
 %hook UIApplication
 - (void)sendEvent:(UIEvent *)event {
     %orig;
@@ -333,24 +311,24 @@ static void installEdgeSwipe() {
 }
 %end
 
-// ========== 入口 ==========
+// ========== 插件入口 ==========
 %ctor {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
-            NSLog(@"[AdInspector] ✅ v7.20 init...");
+            NSLog(@"[AdInspector] ✅ v7.21 init...");
             installEdgeSwipe();
             
             NSDictionary *cfg = loadSkipConfig();
             if (cfg && (cfg[@"relX"] || cfg[@"targetClass"])) {
-                showToast(@"🚀 AdInspector v7.20\n自动跳过已就绪");
+                showToast(@"🚀 AdInspector v7.21\n自动跳过已就绪");
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     performAutoSkip();
                 });
             } else {
-                showToast(@"👁️ AdInspector v7.20\n右边缘左滑=学习\n三指双击=清除配置");
+                showToast(@"👁️ AdInspector v7.21\n右边缘左滑=学习\n三指双击=清除配置");
             }
         } @catch (NSException *e) {
-            NSLog(@"[AdInspector] ❌ v7.20 FATAL: %@", e.reason);
+            NSLog(@"[AdInspector] ❌ v7.21 FATAL: %@", e.reason);
         }
     });
 }

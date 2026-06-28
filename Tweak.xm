@@ -90,7 +90,7 @@ static NSArray<NSString*>* getGestureActions(UIGestureRecognizer *gr) {
     return r;
 }
 
-// ========== 安全自动跳过（防卡死）==========
+// ========== 安全自动跳过 ==========
 static void performAutoSkip() {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
@@ -144,7 +144,6 @@ static void performAutoSkip() {
                 }
             }
             
-            // 兜底：类名查找
             if (tc.length > 0 && sn.length > 0 && ![sn isEqualToString:@"__coordinate_skip__"]) {
                 Class cls = NSClassFromString(tc);
                 SEL sel = NSSelectorFromString(sn);
@@ -197,8 +196,12 @@ static void performAutoSkip() {
 static void showLearnPanel() {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
+            // ✅ 始终使用屏幕尺寸作为基准
             CGRect screenBounds = [UIScreen mainScreen].bounds;
-            if (screenBounds.size.width <= 0 || screenBounds.size.height <= 0) {
+            CGFloat sw = screenBounds.size.width;
+            CGFloat sh = screenBounds.size.height;
+            
+            if (sw <= 0 || sh <= 0) {
                 showToast(@"❌ 屏幕尺寸异常");
                 return;
             }
@@ -207,7 +210,7 @@ static void showLearnPanel() {
             lw.windowLevel = UIWindowLevelAlert + 2000;
             lw.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.15];
             
-            UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(20, 60, screenBounds.size.width - 40, 60)];
+            UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(20, 60, sw - 40, 60)];
             hint.text = @"🎯 学习模式\n请点击广告【跳过】按钮";
             hint.numberOfLines = 0;
             hint.textColor = [UIColor whiteColor];
@@ -219,7 +222,7 @@ static void showLearnPanel() {
             [lw addSubview:hint];
             
             UIButton *cancelBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-            cancelBtn.frame = CGRectMake(screenBounds.size.width / 2 - 60, screenBounds.size.height - 100, 120, 44);
+            cancelBtn.frame = CGRectMake(sw / 2 - 60, sh - 100, 120, 44);
             [cancelBtn setTitle:@"❌ 取消学习" forState:UIControlStateNormal];
             [cancelBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
             cancelBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16];
@@ -234,19 +237,30 @@ static void showLearnPanel() {
                 UIView *hintV = objc_getAssociatedObject(self, "hintView");
                 if (!window) return;
                 
-                CGPoint p = [g locationInView:window];
+                // ✅ 核心修复：使用 nil 获取屏幕绝对坐标，彻底绕过 UIWindow 坐标系问题
+                CGPoint screenP = [g locationInView:nil];
+                CGRect screenB = [UIScreen mainScreen].bounds;
+                CGFloat scrW = screenB.size.width;
+                CGFloat scrH = screenB.size.height;
                 
-                if (cBtn && CGRectContainsPoint(cBtn.frame, p)) {
+                if (scrW <= 0 || scrH <= 0) {
+                    showToast(@"❌ 屏幕尺寸读取失败");
+                    return;
+                }
+                
+                // 用屏幕坐标判断取消按钮和提示标签
+                if (cBtn && CGRectContainsPoint(cBtn.frame, screenP)) {
                     window.hidden = YES;
                     showToast(@"❌ 学习已取消");
                     return;
                 }
-                if (hintV && CGRectContainsPoint(hintV.frame, p)) return;
+                if (hintV && CGRectContainsPoint(hintV.frame, screenP)) {
+                    return;
+                }
                 
                 // 隐藏面板让 hitTest 穿透
                 window.hidden = YES;
                 
-                // 延迟一帧确保面板完全隐藏后再 hitTest
                 dispatch_async(dispatch_get_main_queue(), ^{
                     @try {
                         UIWindow *realWindow = nil;
@@ -267,19 +281,21 @@ static void showLearnPanel() {
                             return;
                         }
                         
-                        UIView *hit = [realWindow hitTest:p withEvent:nil];
+                        // ✅ 用屏幕坐标在真实窗口上做 hitTest
+                        // 先将屏幕坐标转换为真实窗口坐标系
+                        CGPoint winP = [realWindow convertPoint:screenP fromWindow:nil];
+                        UIView *hit = [realWindow hitTest:winP withEvent:nil];
+                        
                         if (!hit) {
                             window.hidden = NO;
                             showToast(@"❌ 未命中视图，请重试");
                             return;
                         }
                         
-                        // 使用真实窗口的尺寸计算相对坐标
-                        CGSize realSize = realWindow.bounds.size;
-                        CGFloat relX = p.x / realSize.width;
-                        CGFloat relY = p.y / realSize.height;
+                        // ✅ 使用屏幕尺寸归一化（而非窗口尺寸）
+                        CGFloat relX = screenP.x / scrW;
+                        CGFloat relY = screenP.y / scrH;
                         
-                        // 安全检查：排除无效坐标
                         if (relX < 0.01 || relY < 0.01 || relX > 0.99 || relY > 0.99) {
                             window.hidden = NO;
                             showToast([NSString stringWithFormat:@"⚠️ 坐标异常(%.1f%%,%.1f%%)\n请重新点击", relX*100, relY*100]);
@@ -401,7 +417,7 @@ static void installEdgeSwipe() {
 %ctor {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
-            NSLog(@"[AdInspector] ✅ v7.25 init...");
+            NSLog(@"[AdInspector] ✅ v7.26 init...");
             installEdgeSwipe();
             
             NSDictionary *cfg = loadSkipConfig();
@@ -409,13 +425,12 @@ static void installEdgeSwipe() {
             CGFloat ry = [cfg[@"relY"] floatValue];
             BOOL validCoords = (rx > 0.001 && ry > 0.001 && rx <= 1.0 && ry <= 1.0);
             
-            // ✅ 修复：显式转换避免 id _Nullable 编译错误
             NSString *savedTc = (NSString *)cfg[@"targetClass"];
             NSString *savedSn = (NSString *)cfg[@"selectorName"];
             BOOL hasValidClass = (savedTc.length > 0 && ![savedSn isEqualToString:@"__coordinate_skip__"]);
             
             if (validCoords || hasValidClass) {
-                showToast(@"🚀 AdInspector v7.25\n自动跳过已就绪");
+                showToast(@"🚀 AdInspector v7.26\n自动跳过已就绪");
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     performAutoSkip();
                 });
@@ -424,10 +439,10 @@ static void installEdgeSwipe() {
                     NSLog(@"[AdInspector] Config exists but invalid, clearing");
                     clearSkipConfig();
                 }
-                showToast(@"👁️ AdInspector v7.25\n右边缘左滑=学习\n三指双击=清除配置");
+                showToast(@"👁️ AdInspector v7.26\n右边缘左滑=学习\n三指双击=清除配置");
             }
         } @catch (NSException *e) {
-            NSLog(@"[AdInspector] ❌ v7.25 FATAL: %@", e.reason);
+            NSLog(@"[AdInspector] ❌ v7.26 FATAL: %@", e.reason);
         }
     });
 }

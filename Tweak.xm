@@ -123,19 +123,24 @@ static AIPEventHandler *getHandler(void) {
 }
 
 // ==================== 窗口手势绑定工具 ====================
+// ==================== 窗口手势绑定工具 ====================
+static char kAIPBoundKey;
+
 static void bindGesturesToWindow(UIWindow *w) {
     if (!w) return;
-    AIPEventHandler *handler = getHandler();
     
-    // 检查是否已绑定，避免重复
-    for (UIGestureRecognizer *g in w.gestureRecognizers) {
-        if ([g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]] && g.target == handler) return;
-    }
+    // ✅ 修复: 用 Associated Object 标记代替 g.target == handler
+    if (objc_getAssociatedObject(w, &kAIPBoundKey)) return;
+    
+    AIPEventHandler *handler = getHandler();
     
     UIScreenEdgePanGestureRecognizer *edgePan = [[UIScreenEdgePanGestureRecognizer alloc] initWithTarget:handler action:@selector(handleEdgePan:)];
     edgePan.edges = UIRectEdgeLeft;
-    edgePan.delegate = handler; // ✅ 设置代理以支持并发识别
+    edgePan.delegate = handler;
     [w addGestureRecognizer:edgePan];
+    
+    // 标记该窗口已绑定
+    objc_setAssociatedObject(w, &kAIPBoundKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     
     NSLog(@"[AdInspector] ✅ 手势已绑定到窗口: %@", w);
 }

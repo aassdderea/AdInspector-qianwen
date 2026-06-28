@@ -92,10 +92,8 @@ static NSArray<NSString*>* getGestureActions(UIGestureRecognizer *gr) {
 
 // ========== 安全自动跳过（防卡死）==========
 static void performAutoSkip() {
-    // ✅ 关键：不在主线程同步执行 hitTest，改用异步+超时保护
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            // 检查 App 是否活跃，避免在后台/过渡态触发
             if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
                 NSLog(@"[AdInspector] Skip deferred: app not active");
                 return;
@@ -107,14 +105,13 @@ static void performAutoSkip() {
             CGFloat rx = [cfg[@"relX"] floatValue];
             CGFloat ry = [cfg[@"relY"] floatValue];
             
-            // ✅ 验证坐标有效性（排除 0,0 和 NaN）
             if (rx <= 0.001 || ry <= 0.001 || rx > 1.0 || ry > 1.0) {
                 NSLog(@"[AdInspector] Invalid coords: (%f, %f), skipping auto-skip", rx, ry);
                 return;
             }
             
-            NSString *tc = cfg[@"targetClass"];
-            NSString *sn = cfg[@"selectorName"];
+            NSString *tc = (NSString *)cfg[@"targetClass"];
+            NSString *sn = (NSString *)cfg[@"selectorName"];
             
             for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
                 if (scene.activationState != UISceneActivationStateForegroundActive) continue;
@@ -148,7 +145,7 @@ static void performAutoSkip() {
             }
             
             // 兜底：类名查找
-            if (tc.length && sn.length && ![sn isEqualToString:@"__coordinate_skip__"]) {
+            if (tc.length > 0 && sn.length > 0 && ![sn isEqualToString:@"__coordinate_skip__"]) {
                 Class cls = NSClassFromString(tc);
                 SEL sel = NSSelectorFromString(sn);
                 if (cls) {
@@ -200,7 +197,6 @@ static void performAutoSkip() {
 static void showLearnPanel() {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            // ✅ 使用 screen bounds 而非 window bounds 计算尺寸
             CGRect screenBounds = [UIScreen mainScreen].bounds;
             if (screenBounds.size.width <= 0 || screenBounds.size.height <= 0) {
                 showToast(@"❌ 屏幕尺寸异常");
@@ -247,10 +243,10 @@ static void showLearnPanel() {
                 }
                 if (hintV && CGRectContainsPoint(hintV.frame, p)) return;
                 
-                // ✅ 隐藏面板让 hitTest 穿透
+                // 隐藏面板让 hitTest 穿透
                 window.hidden = YES;
                 
-                // ✅ 延迟一帧确保面板完全隐藏后再 hitTest
+                // 延迟一帧确保面板完全隐藏后再 hitTest
                 dispatch_async(dispatch_get_main_queue(), ^{
                     @try {
                         UIWindow *realWindow = nil;
@@ -278,12 +274,12 @@ static void showLearnPanel() {
                             return;
                         }
                         
-                        // ✅ 使用真实窗口的尺寸计算相对坐标
+                        // 使用真实窗口的尺寸计算相对坐标
                         CGSize realSize = realWindow.bounds.size;
                         CGFloat relX = p.x / realSize.width;
                         CGFloat relY = p.y / realSize.height;
                         
-                        // ✅ 安全检查：排除无效坐标
+                        // 安全检查：排除无效坐标
                         if (relX < 0.01 || relY < 0.01 || relX > 0.99 || relY > 0.99) {
                             window.hidden = NO;
                             showToast([NSString stringWithFormat:@"⚠️ 坐标异常(%.1f%%,%.1f%%)\n请重新点击", relX*100, relY*100]);
@@ -405,30 +401,33 @@ static void installEdgeSwipe() {
 %ctor {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
-            NSLog(@"[AdInspector] ✅ v7.24 init...");
+            NSLog(@"[AdInspector] ✅ v7.25 init...");
             installEdgeSwipe();
             
             NSDictionary *cfg = loadSkipConfig();
-            // ✅ 只有坐标有效时才启用自动跳过
             CGFloat rx = [cfg[@"relX"] floatValue];
             CGFloat ry = [cfg[@"relY"] floatValue];
             BOOL validCoords = (rx > 0.001 && ry > 0.001 && rx <= 1.0 && ry <= 1.0);
             
-            if (validCoords || (cfg[@"targetClass"].length && ![cfg[@"selectorName"] isEqualToString:@"__coordinate_skip__"])) {
-                showToast(@"🚀 AdInspector v7.24\n自动跳过已就绪");
-                // ✅ 延迟更久，等广告 UI 完全渲染
+            // ✅ 修复：显式转换避免 id _Nullable 编译错误
+            NSString *savedTc = (NSString *)cfg[@"targetClass"];
+            NSString *savedSn = (NSString *)cfg[@"selectorName"];
+            BOOL hasValidClass = (savedTc.length > 0 && ![savedSn isEqualToString:@"__coordinate_skip__"]);
+            
+            if (validCoords || hasValidClass) {
+                showToast(@"🚀 AdInspector v7.25\n自动跳过已就绪");
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     performAutoSkip();
                 });
             } else {
                 if (cfg) {
-                    NSLog(@"[AdInspector] Config exists but coords invalid, clearing");
+                    NSLog(@"[AdInspector] Config exists but invalid, clearing");
                     clearSkipConfig();
                 }
-                showToast(@"👁️ AdInspector v7.24\n右边缘左滑=学习\n三指双击=清除配置");
+                showToast(@"👁️ AdInspector v7.25\n右边缘左滑=学习\n三指双击=清除配置");
             }
         } @catch (NSException *e) {
-            NSLog(@"[AdInspector] ❌ v7.24 FATAL: %@", e.reason);
+            NSLog(@"[AdInspector] ❌ v7.25 FATAL: %@", e.reason);
         }
     });
 }

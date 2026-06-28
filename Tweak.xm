@@ -2,7 +2,7 @@
 #import <objc/runtime.h>
 
 // ==================== 配置与常量 ====================
-static NSString *const kConfigKey = @"AdInspector_Config_v84";
+static NSString *const kConfigKey = @"AdInspector_Config_v85";
 static NSString *const kLearnModeKey = @"AdInspector_LearnMode";
 static NSTimeInterval const kConfigExpireInterval = 24 * 60 * 60;
 
@@ -18,14 +18,14 @@ static NSDictionary *loadConfig(void);
 static void saveConfig(NSDictionary *config);
 static AISkipTarget searchByClassAndText(UIWindow *window, NSDictionary *features);
 static AISkipTarget searchByIndexPath(UIWindow *window, NSDictionary *features);
-static AISkipTarget searchByRelativeCoordinate(UIWindow *window, CGFloat xR, CGFloat yR, CGFloat tolerance);
+static AISkipTarget searchByRelativeCoordinate(UIWindow *window, CGFloat xR, CGFloat yR);
 static UIView *findRealInteractiveTarget(UIView *hitView, UIWindow *window);
 static NSDictionary *extractFeatures(UIView *target, UIWindow *window);
 static UIWindow *getActiveNormalWindow(void);
 static void showLearnPanel(void);
 static void performAutoSkip(void);
 
-// ✅ 修复核心: 专用事件处理器，避免 %new 跨作用域和 UIApplication target 问题
+// ==================== ✅ 核心修复: 专用事件处理器单例 ====================
 @interface AIPEventHandler : NSObject
 - (void)handleEdgePan:(UIScreenEdgePanGestureRecognizer *)gesture;
 - (void)handleLearnTap:(UITapGestureRecognizer *)gesture;
@@ -54,7 +54,11 @@ static void performAutoSkip(void);
     UIWindow *realWindow = getActiveNormalWindow();
     if (!realWindow) { showToast(@"⚠️ 未找到活跃窗口"); return; }
     
+    // 临时隐藏学习窗口以获取底层真实视图
+    lw.hidden = YES;
     UIView *hitView = [realWindow hitTest:screenPoint withEvent:nil];
+    lw.hidden = NO;
+    
     if (!hitView) { showToast(@"⚠️ 未命中任何视图，请重试"); return; }
     
     UIView *realTarget = findRealInteractiveTarget(hitView, realWindow);
@@ -93,7 +97,6 @@ static void performAutoSkip(void);
 
 @end
 
-// 全局单例 Handler
 static AIPEventHandler *g_handler = nil;
 static AIPEventHandler *getHandler(void) {
     static dispatch_once_t onceToken;
@@ -103,22 +106,64 @@ static AIPEventHandler *getHandler(void) {
     return g_handler;
 }
 
-// ==================== Hook 入口 (✅ 合并为单一 %hook 块) ====================
+// ==================== ✅ 注入验证构造函数 ====================
+%ctor {
+    NSLog(@"[AdInspector] ✅ Tweak 已成功加载到进程: %@", [[NSBundle mainBundle] bundleIdentifier]);
+    
+    // 延迟弹出系统级 Alert 作为终极注入验证
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"AdInspector v8.5"
+                                                                       message:[NSString stringWithFormat:@"Tweak 已注入成功！\nBundleID: %@\n如果看不到此弹窗，说明注入失败。", [[NSBundle mainBundle] bundleIdentifier]]
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+        
+        UIViewController *topVC = nil;
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                for (UIWindow *w in scene.windows) {
+                    if (w.rootViewController && !w.isHidden) {
+                        topVC = w.rootViewController;
+                        while (topVC.presentedViewController) {
+                            topVC = topVC.presentedViewController;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        if (topVC) {
+            [topVC presentViewController:alert animated:YES completion:nil];
+        } else {
+            // 兜底：如果找不到 VC，直接用 Toast 提示
+            showToast(@"✅ AdInspector v8.5 已注入\n但未找到顶层VC显示Alert");
+        }
+    });
+}
+
+// ==================== Hook 入口 (单一 %hook 块) ====================
 %hook UIApplication
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     BOOL result = %orig;
     
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
+    // 延迟注册手势，确保 Scene 和 Window 已就绪
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         AIPEventHandler *handler = getHandler();
-        UIScreenEdgePanGestureRecognizer *edgePan = [[UIScreenEdgePanGestureRecognizer alloc] initWithTarget:handler action:@selector(handleEdgePan:)];
-        edgePan.edges = UIRectEdgeLeft;
         
         for (UIWindowScene *scene in application.connectedScenes) {
             if (scene.activationState == UISceneActivationStateForegroundActive) {
                 for (UIWindow *w in scene.windows) {
-                    [w addGestureRecognizer:edgePan];
+                    // 避免重复添加
+                    BOOL hasPan = NO;
+                    for (UIGestureRecognizer *g in w.gestureRecognizers) {
+                        if ([g isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) { hasPan = YES; break; }
+                    }
+                    if (!hasPan) {
+                        UIScreenEdgePanGestureRecognizer *edgePan = [[UIScreenEdgePanGestureRecognizer alloc] initWithTarget:handler action:@selector(handleEdgePan:)];
+                        edgePan.edges = UIRectEdgeLeft;
+                        [w addGestureRecognizer:edgePan];
+                        NSLog(@"[AdInspector] ✅ 边缘手势已添加到窗口: %@", w);
+                    }
                 }
             }
         }
@@ -158,8 +203,6 @@ static void showLearnPanel(void) {
     lw.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.3];
     lw.windowLevel = UIWindowLevelAlert + 100;
     lw.hidden = NO;
-    
-    // 让学习窗口能接收事件但不阻挡底层穿透
     lw.userInteractionEnabled = YES;
     
     CGFloat safeBottom = 0;
@@ -234,7 +277,7 @@ static void performAutoSkip(void) {
     if (!target.found) {
         CGFloat xR = [features[@"xRatio"] floatValue];
         CGFloat yR = [features[@"yRatio"] floatValue];
-        target = searchByRelativeCoordinate(realWindow, xR, yR, 0.08);
+        target = searchByRelativeCoordinate(realWindow, xR, yR);
     }
     
     if (target.found && target.targetView) {
@@ -387,7 +430,7 @@ static AISkipTarget searchByIndexPath(UIWindow *window, NSDictionary *features) 
     return result;
 }
 
-static AISkipTarget searchByRelativeCoordinate(UIWindow *window, CGFloat xR, CGFloat yR, CGFloat tolerance) {
+static AISkipTarget searchByRelativeCoordinate(UIWindow *window, CGFloat xR, CGFloat yR) {
     AISkipTarget result = {0};
     CGFloat wW = window.bounds.size.width;
     CGFloat wH = window.bounds.size.height;
@@ -414,14 +457,13 @@ static void saveConfig(NSDictionary *config) {
     [NSUserDefaults.standardUserDefaults synchronize];
 }
 
-// ==================== ✅ Toast 修复: 使用独立高层级 UIWindow ====================
+// ==================== ✅ Toast: 独立高层级 UIWindow ====================
 static void showToast(NSString *msg) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 创建独立的 Toast 窗口，确保不被学习面板遮挡
         UIWindow *toastWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
         toastWin.windowLevel = UIWindowLevelAlert + 200;
         toastWin.backgroundColor = [UIColor clearColor];
-        toastWin.userInteractionEnabled = NO; // 不拦截任何触摸
+        toastWin.userInteractionEnabled = NO;
         toastWin.hidden = NO;
         
         UILabel *toast = [[UILabel alloc] init];

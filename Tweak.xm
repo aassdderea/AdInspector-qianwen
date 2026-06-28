@@ -1,7 +1,17 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <dispatch/dispatch.h>
+#import <QuartzCore/QuartzCore.h>
+
+// ============================================================
+#pragma mark - 私有API前置声明 (消除隐式声明警告)
+// ============================================================
+
+@interface UIApplication (Private)
+- (UIEvent *)_touchesEvent;
+@end
 
 // ============================================================
 #pragma mark - 常量与宏定义
@@ -15,7 +25,10 @@ static NSTimeInterval const kRetryDelay = 1.0;
 static NSTimeInterval const kToastDuration = 3.0;
 static NSTimeInterval const kAutoSkipInitialDelay = 4.0;
 
-// 安全字典取值宏，彻底杜绝 id _Nullable 警告
+// Toast generation counter (修复O2: 并发Toast覆盖问题)
+static NSUInteger sToastGeneration = 0;
+
+// 安全字典取值宏
 #define SAFE_STRING(dict, key) ((NSString *)[(dict) objectForKey:(key)])
 #define SAFE_NUMBER(dict, key) ((NSNumber *)[(dict) objectForKey:(key)])
 
@@ -37,7 +50,6 @@ static NSDictionary* loadSkipConfig() {
         NSData *data = [NSData dataWithContentsOfFile:getConfigPath()];
         if (!data) return nil;
         NSDictionary *cfg = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        // 校验坐标合法性
         CGFloat rx = [SAFE_NUMBER(cfg, @"relX") floatValue];
         CGFloat ry = [SAFE_NUMBER(cfg, @"relY") floatValue];
         if (rx <= 0.001 || ry <= 0.001 || rx > 1.0 || ry > 1.0) {
@@ -73,7 +85,7 @@ static BOOL clearSkipConfig() {
 }
 
 // ============================================================
-#pragma mark - Toast 反馈系统
+#pragma mark - Toast 反馈系统 (含generation防并发)
 // ============================================================
 
 static void showToast(NSString *msg) {
@@ -101,7 +113,6 @@ static void showToast(NSString *msg) {
                 tl.textAlignment = NSTextAlignmentCenter;
                 [tw addSubview:tl];
             } else {
-                // 每次显示前刷新尺寸，防止旋转后错位
                 tw.frame = screenBounds;
             }
             
@@ -116,9 +127,13 @@ static void showToast(NSString *msg) {
             tl.text = msg;
             tw.hidden = NO;
             
+            // ✅ 修复O2: generation counter防止快速连续Toast互相覆盖
+            NSUInteger currentGen = ++sToastGeneration;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kToastDuration * NSEC_PER_SEC)), 
                            dispatch_get_main_queue(), ^{
-                tw.hidden = YES;
+                if (currentGen == sToastGeneration) {
+                    tw.hidden = YES;
+                }
             });
         } @catch (NSException *e) {
             NSLog(@"[AdInspector] Toast error: %@", e.reason);
@@ -133,7 +148,6 @@ static void showToast(NSString *msg) {
 static NSArray<NSString*>* getGestureActions(UIGestureRecognizer *gr) {
     NSMutableArray *results = [NSMutableArray array];
     @try {
-        // 尝试私有 _targets 结构
         id targets = [gr valueForKey:@"_targets"];
         if ([targets isKindOfClass:[NSArray class]]) {
             for (id ti in (NSArray *)targets) {
@@ -162,21 +176,24 @@ typedef struct {
     BOOL found;
 } AISkipTarget;
 
-// L2: 局部递归搜索 (触摸点半径内)
-static UIView* localSubviewSearch(UIView *root, CGPoint touchPoint, CGFloat radius) {
+// ✅ 修复O1: 局部搜索性能优化 (预转换坐标系)
+static UIView* localSubviewSearch(UIView *root, CGPoint screenTouchPoint, CGFloat radius) {
     __block UIView *bestMatch = nil;
     __block CGFloat bestDist = CGFLOAT_MAX;
+    
+    // 将触摸点预先转换到root坐标系，避免每个subview重复convert
+    CGPoint localTouchPoint = [root.superview ? root.superview : root convertPoint:screenTouchPoint fromView:nil];
+    
+    NSArray *keywords = @[@"skip", @"close", @"dismiss", @"ad", @"跳过", @"关闭"];
     
     void (^search)(UIView *, NSInteger) = nil;
     search = ^(UIView *v, NSInteger depth) {
         if (depth > kMaxSearchDepth || !v || v.isHidden || v.alpha < 0.01) return;
         
-        // 检查 accessibilityLabel / restorationIdentifier 关键词
         NSString *label = v.accessibilityLabel ?: @"";
         NSString *restId = v.restorationIdentifier ?: @"";
         NSString *clsName = NSStringFromClass([v class]);
         
-        NSArray *keywords = @[@"skip", @"close", @"dismiss", @"ad", @"跳过", @"关闭"];
         BOOL keywordMatch = NO;
         for (NSString *kw in keywords) {
             if ([label localizedCaseInsensitiveContainsString:kw] ||
@@ -187,12 +204,11 @@ static UIView* localSubviewSearch(UIView *root, CGPoint touchPoint, CGFloat radi
             }
         }
         
-        // 计算中心点到触摸点的距离
-        CGPoint center = [v.superview convertPoint:v.center toView:nil];
-        CGFloat dist = hypot(center.x - touchPoint.x, center.y - touchPoint.y);
+        // ✅ 使用frame直接判断，替代昂贵的convertPoint
+        CGPoint center = CGPointMake(CGRectGetMidX(v.frame), CGRectGetMidY(v.frame));
+        CGFloat dist = hypot(center.x - localTouchPoint.x, center.y - localTouchPoint.y);
         
         if ((dist <= radius || keywordMatch) && dist < bestDist) {
-            // 优先选择有交互能力的视图
             if ([v isKindOfClass:[UIControl class]] || v.gestureRecognizers.count > 0 || keywordMatch) {
                 bestMatch = v;
                 bestDist = dist;
@@ -262,7 +278,6 @@ static AISkipTarget analyzeSkipTarget(UIWindow *realWindow, CGPoint screenPoint)
     CGSize winSize = realWindow.bounds.size;
     if (winSize.width <= 0 || winSize.height <= 0) return result;
     
-    // 将屏幕坐标转换为窗口坐标
     CGPoint winPoint = [realWindow convertPoint:screenPoint fromWindow:nil];
     
     // === L1: 标准 hitTest ===
@@ -275,7 +290,7 @@ static AISkipTarget analyzeSkipTarget(UIWindow *realWindow, CGPoint screenPoint)
         return result;
     }
     
-    // === L2: 局部搜索 ===
+    // === L2: 局部搜索 (✅ 传入屏幕坐标，内部预转换) ===
     UIView *localHit = localSubviewSearch(realWindow.rootViewController.view, screenPoint, kLocalSearchRadius);
     if (localHit) {
         result.hitView = localHit;
@@ -305,7 +320,6 @@ static AISkipTarget analyzeSkipTarget(UIWindow *realWindow, CGPoint screenPoint)
 static void performAutoSkip() {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            // 生命周期检查
             if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
                 NSLog(@"[AdInspector] Skip deferred: app not active");
                 return;
@@ -314,7 +328,6 @@ static void performAutoSkip() {
             NSDictionary *cfg = loadSkipConfig();
             if (!cfg) return;
             
-            // 竖屏检查
             UIInterfaceOrientation orientation = [UIApplication sharedApplication].statusBarOrientation;
             if (orientation != UIInterfaceOrientationPortrait && 
                 orientation != UIInterfaceOrientationPortraitUpsideDown) {
@@ -332,7 +345,6 @@ static void performAutoSkip() {
             CGPoint absScreen = CGPointMake(rx * screenBounds.size.width, 
                                             ry * screenBounds.size.height);
             
-            // 寻找活跃窗口
             UIWindow *realWindow = nil;
             for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
                 if (scene.activationState != UISceneActivationStateForegroundActive) continue;
@@ -350,7 +362,6 @@ static void performAutoSkip() {
                 return;
             }
             
-            // 使用三层分析引擎查找目标
             AISkipTarget target = analyzeSkipTarget(realWindow, absScreen);
             
             if (target.found && target.hitView) {
@@ -388,10 +399,34 @@ static void performAutoSkip() {
                 }
             }
             
-            // 全部失败 → 纯坐标兜底点击
-            UITouch *fakeTouch = [[UITouch alloc] init];
-            // 注意：纯坐标兜底仅作为最后手段，不保证对所有自定义控件有效
-            showToast(@"⚠️ 跳过失败：目标元素未找到\n请重新学习");
+            // ✅ 修复2: 真正的纯坐标兜底点击 (替换原fakeTouch死代码)
+            @try {
+                CGPoint winPoint = [realWindow convertPoint:absScreen fromWindow:nil];
+                
+                Class touchClass = NSClassFromString(@"UITouch");
+                id t1 = [[touchClass alloc] init];
+                ((void (*)(id, SEL, CGPoint))objc_msgSend)(t1, NSSelectorFromString(@"setLocationInWindow:"), winPoint);
+                ((void (*)(id, SEL, UIWindow *))objc_msgSend)(t1, NSSelectorFromString(@"setWindow:"), realWindow);
+                ((void (*)(id, SEL, NSInteger))objc_msgSend)(t1, NSSelectorFromString(@"setPhase:"), UITouchPhaseBegan);
+                ((void (*)(id, SEL, NSTimeInterval))objc_msgSend)(t1, NSSelectorFromString(@"setTimestamp:"), CACurrentMediaTime());
+                
+                UIEvent *event = [[UIApplication sharedApplication] _touchesEvent];
+                if (event) {
+                    NSSet *beganSet = [NSSet setWithObject:t1];
+                    ((void (*)(id, SEL, NSSet *))objc_msgSend)(event, NSSelectorFromString(@"_setTouches:"), beganSet);
+                    [[UIApplication sharedApplication] sendEvent:event];
+                    
+                    ((void (*)(id, SEL, NSInteger))objc_msgSend)(t1, NSSelectorFromString(@"setPhase:"), UITouchPhaseEnded);
+                    ((void (*)(id, SEL, NSTimeInterval))objc_msgSend)(t1, NSSelectorFromString(@"setTimestamp:"), CACurrentMediaTime() + 0.05);
+                    [[UIApplication sharedApplication] sendEvent:event];
+                    
+                    showToast(@"🚀 纯坐标兜底点击");
+                } else {
+                    showToast(@"⚠️ 跳过失败：无法构造触摸事件\n请重新学习");
+                }
+            } @catch (NSException *e) {
+                showToast(@"⚠️ 跳过失败：目标元素未找到\n请重新学习");
+            }
             
         } @catch (NSException *e) {
             NSLog(@"[AdInspector] Auto-skip error: %@", e.reason);
@@ -460,7 +495,6 @@ static void showLearnPanel() {
                 UIView *hintV = objc_getAssociatedObject(self, "hintView");
                 if (!window) return;
                 
-                // ✅ 始终使用屏幕绝对坐标
                 CGPoint screenP = [g locationInView:nil];
                 CGRect scrB = [UIScreen mainScreen].bounds;
                 CGFloat scrW = scrB.size.width;
@@ -471,22 +505,17 @@ static void showLearnPanel() {
                     return;
                 }
                 
-                // 取消按钮判断 (屏幕坐标系)
                 if (cBtn && CGRectContainsPoint(cBtn.frame, screenP)) {
                     window.hidden = YES;
                     showToast(@"❌ 学习已取消");
                     return;
                 }
-                // 提示标签区域忽略
                 if (hintV && CGRectContainsPoint(hintV.frame, screenP)) return;
                 
-                // 隐藏面板准备 hitTest
                 window.hidden = YES;
                 
-                // ✅ 延迟到下一 RunLoop 确保渲染完成
                 dispatch_async(dispatch_get_main_queue(), ^{
                     @try {
-                        // 查找真实活跃窗口
                         UIWindow *realWindow = nil;
                         for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
                             if (scene.activationState != UISceneActivationStateForegroundActive) continue;
@@ -506,7 +535,6 @@ static void showLearnPanel() {
                             return;
                         }
                         
-                        // 执行三层分析
                         AISkipTarget target = analyzeSkipTarget(realWindow, screenP);
                         
                         // ✅ 遮挡自动重试机制
@@ -516,7 +544,6 @@ static void showLearnPanel() {
                                 @try {
                                     AISkipTarget retry = analyzeSkipTarget(realWindow, screenP);
                                     if (retry.found) {
-                                        // 重试成功，继续保存逻辑
                                         CGFloat relX = screenP.x / scrW;
                                         CGFloat relY = screenP.y / scrH;
                                         saveSkipConfig(@{
@@ -526,6 +553,8 @@ static void showLearnPanel() {
                                             @"relY": @(relY),
                                             @"learnedAt": @([[NSDate date] timeIntervalSince1970])
                                         });
+                                        // ✅ 修复1: 重试成功后隐藏窗口
+                                        window.hidden = YES;
                                         UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
                                         [fb impactOccurred];
                                         showToast([NSString stringWithFormat:@"✅ 重试学习成功!\n类: %@\n坐标: (%.2f%%, %.2f%%)", 
@@ -542,7 +571,6 @@ static void showLearnPanel() {
                             return;
                         }
                         
-                        // 归一化坐标 (基于屏幕尺寸)
                         CGFloat relX = screenP.x / scrW;
                         CGFloat relY = screenP.y / scrH;
                         
@@ -595,7 +623,6 @@ static void showLearnPanel() {
             objc_setAssociatedObject(cancelHandler, "lw", lw, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             [cancelBtn addTarget:cancelHandler action:@selector(cancelTapped) forControlEvents:UIControlEventTouchUpInside];
             
-            // 关联保留
             objc_setAssociatedObject(lw, "cancelHandler", cancelHandler, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             objc_setAssociatedObject(lw, "handler", handler, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             
@@ -648,7 +675,7 @@ static void installEdgeSwipe() {
 }
 
 // ============================================================
-#pragma mark - 三指双击清除 Hook
+#pragma mark - 三指双击清除 Hook (✅ 修复3: 增强判断逻辑)
 // ============================================================
 
 %hook UIApplication
@@ -657,10 +684,16 @@ static void installEdgeSwipe() {
     @try {
         if (event.type != UIEventTypeTouches) return;
         NSSet *touches = [event allTouches];
-        if (touches.count != 3) return;
+        if (touches.count < 2) return;
         
-        UITouch *sample = touches.anyObject;
-        if (sample.phase == UITouchPhaseEnded && sample.tapCount >= 2) {
+        __block NSInteger endedDoubleTapCount = 0;
+        [touches enumerateObjectsUsingBlock:^(UITouch *t, BOOL *stop) {
+            if (t.phase == UITouchPhaseEnded && t.tapCount >= 2) {
+                endedDoubleTapCount++;
+            }
+        }];
+        
+        if (endedDoubleTapCount >= 2) {
             BOOL ok = clearSkipConfig();
             showToast(ok ? @"🗑️ 配置已清除" : @"ℹ️ 无配置可清除");
             UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
@@ -677,21 +710,21 @@ static void installEdgeSwipe() {
 %ctor {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
-            NSLog(@"[AdInspector] ✅ v8.0 initializing...");
+            NSLog(@"[AdInspector] ✅ v8.1 initializing...");
             installEdgeSwipe();
             
             NSDictionary *cfg = loadSkipConfig();
             if (cfg) {
-                showToast(@"🚀 AdInspector v8.0\n自动跳过已就绪");
+                showToast(@"🚀 AdInspector v8.1\n自动跳过已就绪");
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kAutoSkipInitialDelay * NSEC_PER_SEC)), 
                                dispatch_get_main_queue(), ^{
                     performAutoSkip();
                 });
             } else {
-                showToast(@"👁️ AdInspector v8.0\n右边缘左滑=学习\n三指双击=清除配置");
+                showToast(@"👁️ AdInspector v8.1\n右边缘左滑=学习\n三指双击=清除配置");
             }
         } @catch (NSException *e) {
-            NSLog(@"[AdInspector] ❌ v8.0 FATAL: %@", e.reason);
+            NSLog(@"[AdInspector] ❌ v8.1 FATAL: %@", e.reason);
         }
     });
 }

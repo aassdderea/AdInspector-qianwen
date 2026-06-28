@@ -328,12 +328,22 @@ static void performAutoSkip() {
             NSDictionary *cfg = loadSkipConfig();
             if (!cfg) return;
             
-            UIInterfaceOrientation orientation = [UIApplication sharedApplication].statusBarOrientation;
-            if (orientation != UIInterfaceOrientationPortrait && 
-                orientation != UIInterfaceOrientationPortraitUpsideDown) {
-                showToast(@"⏸️ 当前非竖屏，跳过已暂停");
-                return;
-            }
+// ✅ v8.2: 使用 UIWindowScene.interfaceOrientation 替代废弃API
+UIInterfaceOrientation orientation = UIInterfaceOrientationUnknown;
+for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+    if (scene.activationState == UISceneActivationStateForegroundActive) {
+        orientation = scene.interfaceOrientation;
+        break;
+    }
+}
+
+// 如果无法获取有效场景方向，默认允许执行（避免误拦截）
+if (orientation != UIInterfaceOrientationUnknown &&
+    orientation != UIInterfaceOrientationPortrait && 
+    orientation != UIInterfaceOrientationPortraitUpsideDown) {
+    showToast(@"⏸️ 当前非竖屏，跳过已暂停");
+    return;
+}
             
             CGFloat rx = [SAFE_NUMBER(cfg, @"relX") floatValue];
             CGFloat ry = [SAFE_NUMBER(cfg, @"relY") floatValue];

@@ -478,16 +478,25 @@ static void showLearnPanel() {
             lw.windowLevel = UIWindowLevelAlert + 2000;
             lw.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.15];
             
-            UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(20, 60, sw - 40, 60)];
-            hint.text = @"🎯 学习模式\n请点击广告【跳过】按钮";
-            hint.numberOfLines = 0;
-            hint.textColor = [UIColor whiteColor];
-            hint.font = [UIFont boldSystemFontOfSize:16];
-            hint.textAlignment = NSTextAlignmentCenter;
-            hint.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.7];
-            hint.layer.cornerRadius = 12;
-            hint.clipsToBounds = YES;
-            [lw addSubview:hint];
+// ✅ v8.2: 提示移至底部，避免遮挡顶部广告跳过按钮
+CGFloat safeBottom = 0;
+if (@available(iOS 11.0, *)) {
+    safeBottom = lw.safeAreaInsets.bottom;
+}
+CGFloat hintHeight = 50;
+CGFloat hintY = sh - safeBottom - hintHeight - 20; // 底部安全区上方20pt
+
+UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(20, hintY, sw - 40, hintHeight)];
+hint.text = @"🎯 点击广告【跳过】按钮完成学习";
+hint.numberOfLines = 1;
+hint.textColor = [UIColor whiteColor];
+hint.font = [UIFont boldSystemFontOfSize:14];
+hint.textAlignment = NSTextAlignmentCenter;
+hint.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.5]; // 降低透明度
+hint.layer.cornerRadius = 25;
+hint.clipsToBounds = YES;
+hint.userInteractionEnabled = NO; // ✅ 关键：允许点击穿透到下方真实按钮
+[lw addSubview:hint];
             
             UIButton *cancelBtn = [UIButton buttonWithType:UIButtonTypeSystem];
             cancelBtn.frame = CGRectMake(sw / 2 - 60, sh - 100, 120, 44);

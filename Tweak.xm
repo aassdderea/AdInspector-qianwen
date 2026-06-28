@@ -125,7 +125,6 @@ static void performAutoSkip() {
         CGFloat rx = [cfg[@"relX"] floatValue];
         CGFloat ry = [cfg[@"relY"] floatValue];
         
-        // 优先使用坐标点击
         if (rx > 0 && ry > 0) {
             for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
                 for (UIWindow *win in scene.windows) {
@@ -153,7 +152,6 @@ static void performAutoSkip() {
             }
         }
         
-        // 兜底：类名+选择器
         if (tc.length && sn.length) {
             Class cls = NSClassFromString(tc);
             SEL sel = NSSelectorFromString(sn);
@@ -190,110 +188,129 @@ static void performAutoSkip() {
     }
 }
 
-// ========== 学习面板 ==========
-static void showLearnPanel() {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            UIWindow *lw = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-            lw.windowLevel = UIWindowLevelAlert + 2000;
-            lw.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.15];
-            
-            UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(20, 60, lw.bounds.size.width - 40, 60)];
-            hint.text = @"🎯 学习模式\n请点击广告上的【跳过】按钮\n点击空白处取消";
-            hint.numberOfLines = 0;
-            hint.textColor = [UIColor whiteColor];
-            hint.font = [UIFont boldSystemFontOfSize:16];
-            hint.textAlignment = NSTextAlignmentCenter;
-            hint.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.7];
-            hint.layer.cornerRadius = 12;
-            hint.clipsToBounds = YES;
-            [lw addSubview:hint];
-            
-            UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithActionBlock:^(UITapGestureRecognizer *g) {
-                CGPoint p = [g locationInView:lw];
-                // 点击提示区域或顶部120pt内视为取消
-                if (p.y < 130) {
-                    lw.hidden = YES;
-                    showToast(@"❌ 学习已取消");
-                    return;
-                }
+// ========== 学习面板辅助类（解决 block 回调问题）==========
+@interface AdInspectorLearnHandler : NSObject
+@property (nonatomic, weak) UIWindow *learnWindow;
+- (void)handleLearnTap:(UITapGestureRecognizer *)gesture;
+@end
+
+@implementation AdInspectorLearnHandler
+- (void)handleLearnTap:(UITapGestureRecognizer *)gesture {
+    CGPoint p = [gesture locationInView:self.learnWindow];
+    if (p.y < 130) {
+        self.learnWindow.hidden = YES;
+        showToast(@"❌ 学习已取消");
+        return;
+    }
+    
+    UIWindow *realWindow = nil;
+    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        for (UIWindow *w in scene.windows) {
+            if (w != self.learnWindow && w.isKeyWindow) { realWindow = w; break; }
+        }
+    }
+    
+    UIView *hit = [realWindow hitTest:p withEvent:nil];
+    if (!hit) {
+        showToast(@"❌ 未命中视图，请重试");
+        return;
+    }
+    
+    CGFloat relX = p.x / self.learnWindow.bounds.size.width;
+    CGFloat relY = p.y / self.learnWindow.bounds.size.height;
+    
+    NSString *tc = NSStringFromClass([hit class]);
+    NSString *sn = @"__coordinate_skip__";
+    for (UIGestureRecognizer *gr in hit.gestureRecognizers) {
+        NSArray *acts = getGestureActions(gr);
+        for (NSString *info in acts) {
+            NSRange ar = [info rangeOfString:@" -> "];
+            if (ar.location != NSNotFound) {
+                sn = [info substringFromIndex:ar.location + 4];
+                break;
+            }
+        }
+        if (![sn isEqualToString:@"__coordinate_skip__"]) break;
+    }
+    
+    saveSkipConfig(@{
+        @"targetClass": tc,
+        @"selectorName": sn,
+        @"relX": @(relX),
+        @"relY": @(relY),
+        @"learnedAt": @([[NSDate date] timeIntervalSince1970])
+    });
+    
+    self.learnWindow.hidden = YES;
+    UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [fb impactOccurred];
+    showToast([NSString stringWithFormat:@"✅ 学习成功!\n类: %@\n坐标: (%.2f%%, %.2f%%)", 
+              tc, relX * 100, relY * 100]);
+}
+@end
+
+// ========== 边缘滑动辅助类 ==========
+@interface AdInspectorEdgeHandler : NSObject
+- (void)handleEdgeSwipe:(UIScreenEdgePanGestureRecognizer *)gesture;
+@end
+
+@implementation AdInspectorEdgeHandler
+- (void)handleEdgeSwipe:(UIScreenEdgePanGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateRecognized) {
+        // 内联学习面板创建逻辑
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try {
+                UIWindow *lw = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+                lw.windowLevel = UIWindowLevelAlert + 2000;
+                lw.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.15];
                 
-                // 获取真实窗口中的 hitView
-                UIWindow *realWindow = nil;
-                for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                    for (UIWindow *w in scene.windows) {
-                        if (w != lw && w.isKeyWindow) { realWindow = w; break; }
-                    }
-                }
+                UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(20, 60, lw.bounds.size.width - 40, 60)];
+                hint.text = @"🎯 学习模式\n请点击广告上的【跳过】按钮\n点击空白处取消";
+                hint.numberOfLines = 0;
+                hint.textColor = [UIColor whiteColor];
+                hint.font = [UIFont boldSystemFontOfSize:16];
+                hint.textAlignment = NSTextAlignmentCenter;
+                hint.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.7];
+                hint.layer.cornerRadius = 12;
+                hint.clipsToBounds = YES;
+                [lw addSubview:hint];
                 
-                UIView *hit = [realWindow hitTest:p withEvent:nil];
-                if (!hit) {
-                    showToast(@"❌ 未命中视图，请重试");
-                    return;
-                }
+                AdInspectorLearnHandler *handler = [[AdInspectorLearnHandler alloc] init];
+                handler.learnWindow = lw;
+                UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:handler action:@selector(handleLearnTap:)];
+                [lw addGestureRecognizer:tap];
                 
-                // 记录相对坐标
-                CGFloat relX = p.x / lw.bounds.size.width;
-                CGFloat relY = p.y / lw.bounds.size.height;
+                // 保持 handler 引用防止释放
+                objc_setAssociatedObject(lw, "learnHandler", handler, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 
-                // 尝试提取类名和手势
-                NSString *tc = NSStringFromClass([hit class]);
-                NSString *sn = @"__coordinate_skip__";
-                for (UIGestureRecognizer *gr in hit.gestureRecognizers) {
-                    NSArray *acts = getGestureActions(gr);
-                    for (NSString *info in acts) {
-                        NSRange ar = [info rangeOfString:@" -> "];
-                        if (ar.location != NSNotFound) {
-                            sn = [info substringFromIndex:ar.location + 4];
-                            break;
-                        }
-                    }
-                    if (![sn isEqualToString:@"__coordinate_skip__"]) break;
-                }
-                
-                saveSkipConfig(@{
-                    @"targetClass": tc,
-                    @"selectorName": sn,
-                    @"relX": @(relX),
-                    @"relY": @(relY),
-                    @"learnedAt": @([[NSDate date] timeIntervalSince1970])
-                });
-                
-                lw.hidden = YES;
+                [lw makeKeyAndVisible];
                 UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
                 [fb impactOccurred];
-                showToast([NSString stringWithFormat:@"✅ 学习成功!\n类: %@\n坐标: (%.2f%%, %.2f%%)", 
-                          tc, relX * 100, relY * 100]);
-            }];
-            [lw addGestureRecognizer:tap];
-            
-            [lw makeKeyAndVisible];
-            UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-            [fb impactOccurred];
-        } @catch (NSException *e) {
-            showToast([NSString stringWithFormat:@"❌ 学习面板异常: %@", e.reason]);
-        }
-    });
+            } @catch (NSException *e) {
+                showToast([NSString stringWithFormat:@"❌ 学习面板异常: %@", e.reason]);
+            }
+        });
+    }
 }
+@end
 
-// ========== 边缘滑动手势 ==========
+// ========== 安装边缘手势 ==========
 static void installEdgeSwipe() {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
                 for (UIWindow *win in scene.windows) {
-                    if (win.tag == 9527) continue; // 避免重复安装
+                    if (win.tag == 9527) continue;
                     win.tag = 9527;
                     
-                    UIScreenEdgePanGestureRecognizer *edge = [[UIScreenEdgePanGestureRecognizer alloc]
-                        initWithActionBlock:^(UIScreenEdgePanGestureRecognizer *g) {
-                            if (g.state == UIGestureRecognizerStateRecognized) {
-                                showLearnPanel();
-                            }
-                        }];
+                    AdInspectorEdgeHandler *edgeHandler = [[AdInspectorEdgeHandler alloc] init];
+                    UIScreenEdgePanGestureRecognizer *edge = [[UIScreenEdgePanGestureRecognizer alloc] 
+                        initWithTarget:edgeHandler action:@selector(handleEdgeSwipe:)];
                     edge.edges = UIRectEdgeRight;
                     edge.cancelsTouchesInView = NO;
                     [win addGestureRecognizer:edge];
+                    
+                    objc_setAssociatedObject(win, "edgeHandler", edgeHandler, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 }
             }
         } @catch (NSException *e) {}
@@ -320,20 +337,20 @@ static void installEdgeSwipe() {
 %ctor {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
-            NSLog(@"[AdInspector] ✅ v7.19 init...");
+            NSLog(@"[AdInspector] ✅ v7.20 init...");
             installEdgeSwipe();
             
             NSDictionary *cfg = loadSkipConfig();
             if (cfg && (cfg[@"relX"] || cfg[@"targetClass"])) {
-                showToast(@"🚀 AdInspector v7.19\n自动跳过已就绪");
+                showToast(@"🚀 AdInspector v7.20\n自动跳过已就绪");
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     performAutoSkip();
                 });
             } else {
-                showToast(@"👁️ AdInspector v7.19\n右边缘左滑=学习\n三指双击=清除配置");
+                showToast(@"👁️ AdInspector v7.20\n右边缘左滑=学习\n三指双击=清除配置");
             }
         } @catch (NSException *e) {
-            NSLog(@"[AdInspector] ❌ v7.19 FATAL: %@", e.reason);
+            NSLog(@"[AdInspector] ❌ v7.20 FATAL: %@", e.reason);
         }
     });
 }
